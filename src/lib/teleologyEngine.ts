@@ -1,10 +1,17 @@
 import OpenAI from "openai";
 
-// Create OpenAI client (server-side only)
+// Lazy initialization of OpenAI client (server-side only)
 // This will only be used in API routes, never in client components
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let openai: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
+  if (!openai) {
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+  return openai;
+}
 
 export type TeleologyType =
   | "personal"
@@ -61,7 +68,7 @@ Return a JSON object with exactly the following fields:
 If there is no teleological story, set "purposeClaim" to an empty string.
 `;
 
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAIClient().chat.completions.create({
       model: "gpt-4o-mini",
       response_format: { type: "json_object" },
       messages: [

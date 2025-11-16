@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { analyzeTeleology } from "../../../src/lib/teleologyEngine";
+import { analyzeTeleology } from "@shared/lib/teleologyEngine";
 
 export async function POST(req: NextRequest) {
   try {
