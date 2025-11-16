@@ -19,8 +19,12 @@
     "jsx": "preserve",
     "incremental": true,
     "downlevelIteration": true,
+    "baseUrl": ".",
+    "rootDirs": [".", "../src"],
+    "typeRoots": ["./node_modules/@types", "../node_modules/@types"],
     "paths": {
-      "@/lib/*": ["../src/lib/*"]
+      "@/lib/*": ["../src/lib/*"],
+      "openai": ["./node_modules/openai"]
     },
     "plugins": [
       {
@@ -32,7 +36,8 @@
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    ".next/types/**/*.ts"
+    ".next/types/**/*.ts",
+    "../src/lib/**/*.ts"
   ],
   "exclude": [
     "node_modules",

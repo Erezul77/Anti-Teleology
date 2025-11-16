@@ -17,6 +17,11 @@ const nextConfig = {
       ...config.resolve.alias,
       '@': require('path').resolve(__dirname, '../src'),
     }
+    // Ensure node_modules from this project are resolved when processing shared files
+    config.resolve.modules = [
+      ...(config.resolve.modules || []),
+      require('path').resolve(__dirname, 'node_modules'),
+    ]
     return config
   },
   // Exclude archive from page generation
