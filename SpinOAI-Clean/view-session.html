@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpiñO Session Viewer</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        .content {
+            padding: 30px;
+        }
+        .session-list {
+            display: grid;
+            gap: 20px;
+        }
+        .session-card {
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            padding: 20px;
+            background: #f8f9fa;
+            transition: all 0.3s ease;
+        }
+        .session-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+        }
+        .session-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .session-id {
+            font-family: 'Courier New', monospace;
+            background: #e9ecef;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+        .session-time {
+            color: #6c757d;
+            font-size: 0.9em;
+        }
+        .session-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat {
+            text-align: center;
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+        }
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .stat-label {
+            font-size: 0.8em;
+            color: #6c757d;
+            text-transform: uppercase;
+        }
+        .messages {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            background: white;
+        }
+        .message {
+            padding: 15px;
+            border-bottom: 1px solid #f1f3f4;
+            display: flex;
+            gap: 15px;
+        }
+        .message:last-child {
+            border-bottom: none;
+        }
+        .message-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2em;
+            flex-shrink: 0;
+        }
+        .user-avatar {
+            background: #667eea;
+            color: white;
+        }
+        .assistant-avatar {
+            background: #28a745;
+            color: white;
+        }
+        .message-content {
+            flex: 1;
+        }
+        .message-role {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #495057;
+        }
+        .message-text {
+            line-height: 1.6;
+            color: #212529;
+        }
+        .no-sessions {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+        .no-sessions h3 {
+            margin-bottom: 10px;
+            color: #495057;
+        }
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: background 0.3s ease;
+        }
+        .btn:hover {
+            background: #5a6fd8;
+        }
+        .export-btn {
+            background: #28a745;
+            margin-left: 10px;
+        }
+        .export-btn:hover {
+            background: #218838;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 SpiñO Session Viewer</h1>
+            <p>View and analyze your saved therapy sessions</p>
+        </div>
+        <div class="content">
+            <div id="sessionContainer">
+                <div class="no-sessions">
+                    <h3>Loading sessions...</h3>
+                    <p>Please wait while we retrieve your saved sessions.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function loadSessions() {
+            const container = document.getElementById('sessionContainer');
+            
+            try {
+                const sessions = JSON.parse(localStorage.getItem('spino-sessions') || '[]');
+                
+                if (sessions.length === 0) {
+                    container.innerHTML = `
+                        <div class="no-sessions">
+                            <h3>📭 No Sessions Found</h3>
+                            <p>No saved sessions found in localStorage. Start a conversation with SpiñO to create your first session!</p>
+                            <button class="btn" onclick="window.close()">Close</button>
+                        </div>
+                    `;
+                    return;
+                }
+
+                const sessionsHTML = sessions.map((session, index) => {
+                    const sessionDate = new Date(session.timestamp).toLocaleString();
+                    const messagesHTML = session.messages.map(msg => `
+                        <div class="message">
+                            <div class="message-avatar ${msg.role === 'user' ? 'user-avatar' : 'assistant-avatar'}">
+                                ${msg.role === 'user' ? '👤' : '🤖'}
+                            </div>
+                            <div class="message-content">
+                                <div class="message-role">${msg.role === 'user' ? 'You' : 'SpiñO'}</div>
+                                <div class="message-text">${msg.content}</div>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    const analytics = session.analytics || {};
+                    const adequacyPercent = analytics.averageAdequacyScore ? 
+                        (analytics.averageAdequacyScore * 100).toFixed(1) : 'N/A';
+                    
+                    return `
+                        <div class="session-card">
+                            <div class="session-header">
+                                <div>
+                                    <h3>Session ${index + 1}</h3>
+                                    <div class="session-time">${sessionDate}</div>
+                                </div>
+                                <div class="session-id">${session.sessionId}</div>
+                            </div>
+                            
+                            <div class="session-stats">
+                                <div class="stat">
+                                    <div class="stat-value">${session.messages.length}</div>
+                                    <div class="stat-label">Messages</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value">${adequacyPercent}%</div>
+                                    <div class="stat-label">Adequacy</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value">${analytics.dominantEmotion || 'N/A'}</div>
+                                    <div class="stat-label">Dominant Emotion</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value">${session.sessionMode || 'therapy'}</div>
+                                    <div class="stat-label">Mode</div>
+                                </div>
+                            </div>
+                            
+                            <div class="messages">
+                                ${messagesHTML}
+                            </div>
+                            
+                            <div style="margin-top: 15px; text-align: right;">
+                                <button class="btn" onclick="exportSession('${session.sessionId}')">Export Session</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                container.innerHTML = `
+                    <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                        <h2>📋 Found ${sessions.length} Session${sessions.length !== 1 ? 's' : ''}</h2>
+                        <div>
+                            <button class="btn" onclick="exportAllSessions()">Export All</button>
+                            <button class="btn export-btn" onclick="window.close()">Close</button>
+                        </div>
+                    </div>
+                    <div class="session-list">
+                        ${sessionsHTML}
+                    </div>
+                `;
+                
+            } catch (error) {
+                container.innerHTML = `
+                    <div class="no-sessions">
+                        <h3>❌ Error Loading Sessions</h3>
+                        <p>Error: ${error.message}</p>
+                        <button class="btn" onclick="window.close()">Close</button>
+                    </div>
+                `;
+            }
+        }
+
+        function exportSession(sessionId) {
+            try {
+                const sessions = JSON.parse(localStorage.getItem('spino-sessions') || '[]');
+                const session = sessions.find(s => s.sessionId === sessionId);
+                
+                if (session) {
+                    const dataStr = JSON.stringify(session, null, 2);
+                    const dataBlob = new Blob([dataStr], {type: 'application/json'});
+                    const url = URL.createObjectURL(dataBlob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `spino-session-${sessionId}.json`;
+                    link.click();
+                    URL.revokeObjectURL(url);
+                }
+            } catch (error) {
+                alert('Error exporting session: ' + error.message);
+            }
+        }
+
+        function exportAllSessions() {
+            try {
+                const sessions = JSON.parse(localStorage.getItem('spino-sessions') || '[]');
+                const dataStr = JSON.stringify(sessions, null, 2);
+                const dataBlob = new Blob([dataStr], {type: 'application/json'});
+                const url = URL.createObjectURL(dataBlob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `spino-all-sessions-${new Date().toISOString().split('T')[0]}.json`;
+                link.click();
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                alert('Error exporting sessions: ' + error.message);
+            }
+        }
+
+        // Load sessions when page loads
+        window.addEventListener('load', loadSessions);
+    </script>
+</body>
+</html> 

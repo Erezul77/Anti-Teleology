@@ -1,0 +1,4 @@
+Remove legacy buttons/links:
+1) Delete any buttons that point to PD Core, PD Whisper, or PD Wizard v6.
+2) If you still need developer access to PD Core utils, keep them under a dev-only page, not in the public Tools card.
+3) Keep only: StartSpinOStudioButton (primary). Optional: text link to /idea-walkthrough as "Advanced".

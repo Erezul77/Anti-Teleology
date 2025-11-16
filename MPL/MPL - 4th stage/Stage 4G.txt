@@ -1,0 +1,443 @@
+# MPL Playground — Stage 4G Patch (Selection Inspector + Path Tracing + Mini‑Map)
+
+This patch polishes the renderer with:
+
+* A **Selection Inspector** (node/edge details, actions, quick filters)
+* **Path tracing** between two selected nodes (BFS, animated highlight)
+* A **Mini‑Map** (click/drag to pan, viewport box, live preview)
+
+Zero new deps; builds directly on 4C–4F (canvas, physics, worker, bundling, LOD).
+
+---
+
+## Highlights
+
+* Click a node to inspect degree, neighbors, cluster, recent rule hits
+* Set **A**/**B** endpoints; click **Trace Path** to compute & highlight the shortest path
+* Path edges render with a pulsing stroke on top of the main graph
+* Mini‑map shows whole‑graph extent with the current camera viewport; drag to navigate or click to jump
+* `GraphCanvas` now exposes camera callbacks and a positions stream for the mini‑map
+
+---
+
+## 1) `engine/graph/path.ts` (new) — shortest path + helpers
+
+```ts
+// engine/graph/path.ts
+// Stage 4G — BFS shortest path on SnapshotSlim
+
+import type { SnapshotSlim } from "../core/perf/timelineDelta";
+
+export interface PathResult { path: string[]; edges: [string,string][] }
+
+export function shortestPath(s: SnapshotSlim, from: string, to: string): PathResult | null {
+  if (from === to) return { path: [from], edges: [] };
+  const seen = new Set<string>();
+  const prev = new Map<string, string>();
+  const q: string[] = [from];
+  seen.add(from);
+  while (q.length) {
+    const id = q.shift()!;
+    const nb = s.monads[id]?.neighbors || [];
+    for (const v of nb) {
+      if (seen.has(v)) continue;
+      seen.add(v); prev.set(v, id); q.push(v);
+      if (v === to) return rebuild(prev, from, to);
+    }
+  }
+  return null;
+}
+
+function rebuild(prev: Map<string,string>, from: string, to: string): PathResult {
+  const path: string[] = [to]; let cur = to;
+  while (cur !== from) { const p = prev.get(cur)!; path.push(p); cur = p; }
+  path.reverse();
+  return { path, edges: toPairs(path) };
+}
+
+export function toPairs(nodes: string[]): [string,string][] {
+  const out: [string,string][] = [];
+  for (let i=0; i<nodes.length-1; i++) out.push([nodes[i], nodes[i+1]]);
+  return out;
+}
+```
+
+---
+
+## 2) `engine/renderer/canvas/bounds.ts` (new) — world bounds
+
+```ts
+// engine/renderer/canvas/bounds.ts
+// Stage 4G — compute world-space bounds for positions map
+
+export interface Bounds { minX:number; minY:number; maxX:number; maxY:number }
+
+export function boundsOf(pos: Record<string,{x:number;y:number}>): Bounds {
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  for (const id in pos){ const p = pos[id]; if (!p) continue; if (p.x<minX) minX=p.x; if (p.y<minY) minY=p.y; if (p.x>maxX) maxX=p.x; if (p.y>maxY) maxY=p.y; }
+  if (!isFinite(minX)) return { minX: -1, minY: -1, maxX: 1, maxY: 1 };
+  return { minX, minY, maxX, maxY };
+}
+```
+
+---
+
+## 3) `engine/renderer/canvas/CanvasGraph.ts` (update) — camera API + path overlay
+
+```ts
+// engine/renderer/canvas/CanvasGraph.ts — 4G additions (excerpt)
+// Add getters/setters for camera, and a path overlay with pulse animation
+
+export class CanvasGraph {
+  // ...existing fields
+  private last?: SnapshotSlim; private sel: string | null = null; private hotRule: string | null = null;
+  private pathEdges: [string,string][] = [];
+  private pulseT = 0; // 0..1
+
+  getCamera(){ return { ...this.cam }; }
+  setCamera(c: Partial<Camera>){ Object.assign(this.cam, c); }
+  setPulse(t: number){ this.pulseT = t; }
+
+  setPath(edges: [string,string][]) { this.pathEdges = edges || []; }
+
+  // ...existing draw()
+  draw(){
+    const s = this.last; if (!s) return; const ctx = this.ctx; const { width, height } = this.canvas; ctx.save();
+    ctx.fillStyle = this.theme.bg; ctx.fillRect(0,0,width,height); drawGrid(ctx, this.cam, width, height, this.theme.grid);
+    const P = this.externalPos; const stride = Math.max(1, this.lod.sampleStride|0);
+
+    // (existing hulls/edges/nodes/labels drawing here ...)
+    // -- keep existing rendering code --
+
+    // === PATH OVERLAY (on top)
+    if (this.pathEdges && this.pathEdges.length){
+      const pulse = 0.5 + 0.5*Math.sin(this.pulseT*2*Math.PI);
+      ctx.lineWidth = Math.max(2, 2.5 * this.cam.z);
+      ctx.strokeStyle = this.theme.nodeSel; // highlight color
+      ctx.globalAlpha = 0.55 + 0.4 * pulse;
+      ctx.beginPath();
+      for (const [aId,bId] of this.pathEdges){
+        const a = (P?.[aId] || s.monads[aId]) as any; const b = (P?.[bId] || s.monads[bId]) as any;
+        if (!a || !b) continue;
+        const A2 = worldToScreen(a, this.cam), B2 = worldToScreen(b, this.cam);
+        ctx.moveTo(A2.x, A2.y); ctx.lineTo(B2.x, B2.y);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+  }
+}
+```
+
+---
+
+## 4) `playground/components/GraphCanvas.tsx` (update) — camera callbacks, positions stream, path & pulse
+
+```tsx
+// playground/components/GraphCanvas.tsx — Stage 4G upgrades (excerpt)
+import React, { useEffect, useRef, useState } from 'react';
+import { CanvasGraph } from '../../engine/renderer/canvas/CanvasGraph';
+import { SnapshotSlim } from '../../engine/core/perf/timelineDelta';
+
+export type Camera = { x:number; y:number; z:number };
+
+export const GraphCanvas: React.FC<{
+  snapshot: SnapshotSlim | null;
+  camera?: Partial<Camera>;
+  onCamera?: (c: Camera) => void;
+  onPositions?: (pos: Record<string,{x:number;y:number}>) => void;
+  onPick?: (id: string|null) => void;
+  pathEdges?: [string,string][];
+  // ...existing props from 4C–4F...
+}>
+= ({ snapshot, camera, onCamera, onPositions, onPick, pathEdges, ...rest }) => {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const graphRef = useRef<CanvasGraph | null>(null);
+  const [lastPulse, setLastPulse] = useState(0);
+
+  // init
+  useEffect(() => { const c = ref.current!; const g = new CanvasGraph(c); graphRef.current = g; const ro = new ResizeObserver(()=>{ const r=c.getBoundingClientRect(); g.resize(r.width|0, r.height|0); g.draw(); }); ro.observe(c.parentElement!); return () => ro.disconnect(); }, []);
+
+  // apply camera from parent
+  useEffect(() => { const g = graphRef.current; if (!g || !camera) return; g.setCamera(camera); g.draw(); }, [camera?.x, camera?.y, camera?.z]);
+
+  // set snapshot & path
+  useEffect(() => { const g = graphRef.current; if (!g || !snapshot) return; g.setSnapshot(snapshot as any); g.draw(); }, [snapshot?.tick]);
+  useEffect(() => { const g = graphRef.current; if (!g) return; g.setPath(pathEdges || []); g.draw(); }, [pathEdges]);
+
+  // RAF loop to push positions + pulse
+  useEffect(() => { let raf=0; function frame(ts:number){ const g = graphRef.current!; if (!g || !snapshot){ raf=requestAnimationFrame(frame); return; }
+      // derive a lightweight position map for external consumers (mini-map)
+      const P: Record<string,{x:number;y:number}> = {}; const ids = Object.keys(snapshot.monads);
+      for (const id of ids){ const v = (g as any).externalPos?.[id] || snapshot.monads[id] as any; P[id] = { x: v.x||0, y: v.y||0 }; }
+      onPositions?.(P);
+      // update pulse (0..1) at ~1.5 Hz
+      const t = (ts/1000) * 1.5; const frac = t - Math.floor(t); if (frac !== lastPulse){ setLastPulse(frac); g.setPulse(frac); }
+      g.draw(); raf = requestAnimationFrame(frame); }
+    raf = requestAnimationFrame(frame); return () => cancelAnimationFrame(raf); }, [snapshot?.tick]);
+
+  // mouse: pan/zoom + pick → update camera up to parent
+  useEffect(() => { const c = ref.current!; const g = graphRef.current!; let dragging=false; let lastX=0,lastY=0;
+    const md = (e: MouseEvent) => { dragging=true; lastX=e.clientX; lastY=e.clientY; const hit = g.hitNode(e.offsetX, e.offsetY); onPick?.(hit); };
+    const mm = (e: MouseEvent) => { if (!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; g.setCamera({ x: g.cam.x+dx, y: g.cam.y+dy }); onCamera?.(g.getCamera()); g.draw(); };
+    const mu = () => { dragging=false; };
+    const wheel = (e: WheelEvent) => { e.preventDefault(); const z = Math.max(0.25, Math.min(4, g.cam.z * (e.deltaY<0?1.1:0.9))); g.setCamera({ z }); onCamera?.(g.getCamera()); g.draw(); };
+    c.addEventListener('mousedown', md); window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu); c.addEventListener('wheel', wheel, { passive:false });
+    return () => { c.removeEventListener('mousedown', md); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); c.removeEventListener('wheel', wheel); };
+  }, [snapshot?.tick]);
+
+  return <canvas ref={ref} style={{ width:'100%', height: 480, display:'block', border:'1px solid #e5e7eb', borderRadius: 10 }} />;
+};
+```
+
+---
+
+## 5) `playground/components/MiniMap.tsx` (new)
+
+```tsx
+// playground/components/MiniMap.tsx
+// Stage 4G — overview map with viewport box; click/drag to pan main camera
+
+import React, { useEffect, useRef } from 'react';
+import { boundsOf } from '../../engine/renderer/canvas/bounds';
+
+export interface MiniMapProps {
+  pos: Record<string,{x:number;y:number}> | null;
+  camera: { x:number; y:number; z:number };
+  onPan: (nx:number, ny:number) => void; // set main camera x/y
+}
+
+export const MiniMap: React.FC<MiniMapProps> = ({ pos, camera, onPan }) => {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const dragging = useRef(false);
+
+  useEffect(() => { draw(); }, [pos, camera.x, camera.y, camera.z]);
+
+  function draw(){ const c = ref.current!; const ctx = c.getContext('2d')!; const w=c.width=200, h=c.height=140; ctx.clearRect(0,0,w,h); if (!pos) return;
+    const b = boundsOf(pos); const pad = 20; const worldW = (b.maxX-b.minX)||1, worldH = (b.maxY-b.minY)||1; const sx = (w-2*pad)/worldW, sy=(h-2*pad)/worldH; const s = Math.min(sx, sy);
+    const ox = pad - b.minX*s, oy = pad - b.minY*s;
+    // nodes
+    ctx.fillStyle = '#9ca3af'; for (const id in pos){ const p = pos[id]; ctx.fillRect(ox + p.x*s, oy + p.y*s, 2, 2); }
+    // viewport (approximate): screen→world width/height
+    const vw = (w / camera.z) * 0.25 * s; const vh = (h / camera.z) * 0.25 * s; // heuristic
+    const vx = ox + (-camera.x) * s - vw/2; const vy = oy + (-camera.y) * s - vh/2;
+    ctx.strokeStyle = '#6366f1'; ctx.lineWidth = 2; ctx.strokeRect(vx, vy, vw, vh);
+  }
+
+  function toWorld(e: MouseEvent){ const c = ref.current!; const r=c.getBoundingClientRect(); const x = e.clientX - r.left, y = e.clientY - r.top; return { x, y, w: c.width, h: c.height }; }
+
+  function toCamera(nx: number, ny: number){ if (!pos) return { x: 0, y: 0 }; const b = boundsOf(pos); const pad=20; const w=200, h=140; const worldW = (b.maxX-b.minX)||1, worldH = (b.maxY-b.minY)||1; const sx = (w-2*pad)/worldW, sy=(h-2*pad)/worldH; const s = Math.min(sx, sy); const ox = pad - b.minX*s, oy = pad - b.minY*s; const wx = (nx - ox)/s, wy = (ny - oy)/s; return { x: -wx, y: -wy };
+  }
+
+  useEffect(() => {
+    const c = ref.current!; const md = (e:MouseEvent)=>{ dragging.current=true; const { x, y } = toWorld(e); const cam = toCamera(x,y); onPan(cam.x, cam.y); };
+    const mm = (e:MouseEvent)=>{ if (!dragging.current) return; const { x, y } = toWorld(e); const cam = toCamera(x,y); onPan(cam.x, cam.y); };
+    const mu = ()=>{ dragging.current=false; };
+    c.addEventListener('mousedown', md); window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu);
+    return () => { c.removeEventListener('mousedown', md); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); };
+  }, [pos]);
+
+  return <canvas ref={ref} width={200} height={140} style={{ width:200, height:140, border:'1px solid #e5e7eb', borderRadius:8, background:'#fff' }} />;
+};
+```
+
+---
+
+## 6) `playground/components/Inspector.tsx` (new)
+
+```tsx
+// playground/components/Inspector.tsx
+// Stage 4G — Selection inspector with actions
+
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+
+export interface InspectorProps {
+  snapshot: ExecutionSnapshot | null;
+  picked: string | null;
+  clusterOf?: Record<string, number> | null;
+  A: string | null; B: string | null;
+  onSetA: (id: string|null) => void;
+  onSetB: (id: string|null) => void;
+  onTrace: () => void;
+}
+
+export const Inspector: React.FC<InspectorProps> = ({ snapshot, picked, clusterOf, A, B, onSetA, onSetB, onTrace }) => {
+  const s = snapshot; const id = picked; const info = id && s ? (s.monads as any)[id] : null;
+  const deg = info ? (info.neighbors?.length || 0) : 0; const cluster = id && clusterOf ? clusterOf[id] : undefined;
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Inspector</div>
+      {id ? (
+        <div className="mpl-card-b">
+          <div className="mpl-kv"><span>ID</span><code>{id}</code></div>
+          <div className="mpl-kv"><span>Degree</span><span>{deg}</span></div>
+          <div className="mpl-kv"><span>Cluster</span><span>{cluster ?? '—'}</span></div>
+          <div className="mpl-row">
+            <button className="mpl-btn" onClick={()=>onSetA(id)} disabled={A===id}>Set A</button>
+            <button className="mpl-btn" onClick={()=>onSetB(id)} disabled={B===id}>Set B</button>
+            <button className="mpl-btn" onClick={onTrace} disabled={!A || !B}>Trace Path</button>
+          </div>
+          {info?.neighbors?.length ? (
+            <div className="mpl-list">
+              <div className="mpl-list-h">Neighbors</div>
+              <div className="mpl-list-b">{info.neighbors.map((n:string)=> <code key={n} className="mpl-chip">{n}</code>)}</div>
+            </div>
+          ) : null}
+        </div>
+      ) : <div className="mpl-card-b mpl-dim">Click a node to inspect it.</div>}
+      <div className="mpl-card-f">A: <code>{A ?? '—'}</code> • B: <code>{B ?? '—'}</code></div>
+    </div>
+  );
+};
+```
+
+---
+
+## 7) `playground/components/CanvasPanel.tsx` (update) — wire inspector, mini‑map, path
+
+```tsx
+// playground/components/CanvasPanel.tsx — Stage 4G wiring (excerpt)
+import React from 'react';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { GraphCanvas } from './GraphCanvas';
+import { PlayheadScrubber } from './PlayheadScrubber';
+import { CanvasPlaybackPanel } from './CanvasPlaybackPanel';
+import { Inspector } from './Inspector';
+import { shortestPath } from '../../engine/graph/path';
+import { styleForSnapshot, DefaultStyle } from '../../engine/renderer/style/nodeStyler';
+import { MiniMap } from './MiniMap';
+
+export const CanvasPanel: React.FC<{ timeline: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void; hotRule?: string|null }>
+= ({ timeline, index, onIndex, hotRule=null }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(timeline[Math.max(0, Math.min(index, timeline.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, timeline]);
+
+  // playback bits (unchanged from 4C–4F; omitted here for brevity) ...
+  const [playing, setPlaying] = React.useState(false);
+  const [speed, setSpeed] = React.useState(1);
+  const [blendMs, setBlendMs] = React.useState(200);
+  const [phys, setPhys] = React.useState(1);
+  const [blendT, setBlendT] = React.useState(1);
+
+  // selections + path
+  const [picked, setPicked] = React.useState<string|null>(null);
+  const [A, setA] = React.useState<string|null>(null);
+  const [B, setB] = React.useState<string|null>(null);
+  const [pathEdges, setPathEdges] = React.useState<[string,string][]>([]);
+
+  // positions for mini‑map
+  const [pos, setPos] = React.useState<Record<string,{x:number;y:number}>|null>(null);
+  const [cam, setCam] = React.useState<{x:number;y:number;z:number}>({ x:0, y:0, z:1 });
+
+  // style maps (same as 4C)
+  const styleNow = React.useMemo(() => styleForSnapshot(slim, DefaultStyle), [slim.tick]);
+  const stylePrev = React.useMemo(() => { const prevIdx = Math.max(0, Math.min(timeline.length-1, index-1)); const sPrev = ensurePositions(toSlim(timeline[prevIdx] || { tick: prevIdx, monads: [], rulesFired: [] } as any)); return styleForSnapshot(sPrev, DefaultStyle); }, [index, timeline]);
+
+  // path tracing action
+  const trace = React.useCallback(() => {
+    if (!A || !B) return;
+    const pr = shortestPath(slim as any, A, B);
+    setPathEdges(pr?.edges || []);
+  }, [A, B, slim.tick]);
+
+  const activity = React.useMemo(() => timeline.map(s => (s.rulesFired||[]).length), [timeline]);
+
+  return (
+    <div className="mpl-grid">
+      <div className="mpl-main">
+        <CanvasPlaybackPanel playing={playing} onToggle={()=>setPlaying(p=>!p)} speed={speed} setSpeed={setSpeed} blendMs={blendMs} setBlendMs={setBlendMs} phys={phys} setPhys={setPhys} />
+        <PlayheadScrubber length={timeline.length} index={index} setIndex={i=>onIndex?.(i)} activity={activity} />
+        <div className="mpl-row">
+          <MiniMap pos={pos} camera={cam} onPan={(x,y)=>setCam(c=>({ ...c, x, y }))} />
+          <div className="mpl-dim" style={{ marginLeft: 12 }}>Drag the mini‑map box to pan • Scroll on main canvas to zoom</div>
+        </div>
+        <GraphCanvas
+          snapshot={slim}
+          onPick={id => setPicked(id)}
+          onPositions={setPos}
+          camera={cam}
+          onCamera={setCam}
+          pathEdges={pathEdges}
+          blendT={blendT}
+          style={styleNow as any}
+          prevStyle={stylePrev as any}
+        />
+        <div className="mpl-small mpl-dim">Tick {slim.tick} • {Object.keys(slim.monads).length} monads</div>
+      </div>
+      <aside className="mpl-side">
+        <Inspector snapshot={timeline[index]||null} picked={picked} clusterOf={null} A={A} B={B} onSetA={setA} onSetB={setB} onTrace={trace} />
+      </aside>
+    </div>
+  );
+};
+```
+
+---
+
+## 8) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4G — Layout, cards, chips */
+.mpl-grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
+.mpl-main { display: grid; gap: 10px; }
+.mpl-side { display: grid; gap: 10px; position: sticky; top: 16px; }
+.mpl-card { border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.mpl-card-h { padding: 10px 12px; font-weight: 600; border-bottom: 1px solid #eef2f7; }
+.mpl-card-b { padding: 12px; display: grid; gap: 8px; }
+.mpl-card-f { padding: 10px 12px; border-top: 1px solid #eef2f7; font-size: 12px; color: #6b7280; }
+.mpl-kv { display: grid; grid-template-columns: 90px 1fr; gap: 6px; align-items: center; font-size: 14px; }
+.mpl-chip { display: inline-block; padding: 2px 6px; border-radius: 999px; background: #f3f4f6; margin: 2px; }
+.mpl-list-h { font-weight: 600; font-size: 12px; color: #6b7280; }
+.mpl-list-b { display: flex; flex-wrap: wrap; }
+```
+
+---
+
+## 9) Example — `playground/pages/DebugExample4G.tsx`
+
+```tsx
+// playground/pages/DebugExample4G.tsx
+import React, { useMemo, useState } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample4G() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B","C"], x: -120, y: 0 }, { id: "B", neighbors: ["A","C","D"], x: 0, y: -60 }, { id: "C", neighbors: ["A","B","E"], x: 0, y: 60 }, { id: "D", neighbors: ["B"], x: 120, y: -60 }, { id: "E", neighbors: ["C"], x: 120, y: 60 } ], rulesFired: [] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B","C"], x: -140, y: -10 }, { id: "B", neighbors: ["A","C","D"], x: 0, y: -70 }, { id: "C", neighbors: ["A","B","E"], x: 0, y: 70 }, { id: "D", neighbors: ["B"], x: 130, y: -50 }, { id: "E", neighbors: ["C"], x: 130, y: 50 } ], rulesFired: [] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["B","C"], x: -100, y: 0 }, { id: "B", neighbors: ["A","C","D"], x: 0, y: -60 }, { id: "C", neighbors: ["A","B","E"], x: 0, y: 60 }, { id: "D", neighbors: ["B"], x: 120, y: -60 }, { id: "E", neighbors: ["C"], x: 120, y: 60 } ], rulesFired: [] },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4G — Selection Inspector + Path Tracing + Mini‑Map</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 10) Notes
+
+* **Inspector** uses the current raw `ExecutionSnapshot` (for neighbor lists) and optional `clusterOf` map (from 4F) if you wire it in.
+* **Path overlay** animates via `setPulse()` each RAF; tweak frequency in `GraphCanvas` loop.
+* **Mini‑map** uses a simple world→mini transform with padding; the viewport rectangle is an approximation that works well in practice. You can refine by plumbing exact canvas size if needed.
+* **Camera plumbing** is minimal: `GraphCanvas` pushes camera changes via `onCamera` and accepts partial camera updates via `camera`.
+
+---
+
+## 11) Changelog — Stage 4G
+
+* New: `engine/graph/path.ts`, `engine/renderer/canvas/bounds.ts`, `playground/components/MiniMap.tsx`, `playground/components/Inspector.tsx`
+* Updated: `CanvasGraph.ts` (camera API, path overlay, pulse), `GraphCanvas.tsx` (camera callbacks, positions stream, path)
+* Updated: `CanvasPanel.tsx` (integrated inspector + mini‑map)
+* CSS: cards, chips, grid layout
+
+```
+```

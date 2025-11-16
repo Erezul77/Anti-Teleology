@@ -1,0 +1,311 @@
+# MPL Playground — Stage 4F Patch (Edge Bundling + Cluster Detection + Hover Halos)
+
+This patch adds **screen‑space edge bundling**, **fast cluster detection + coloring**, and **hover halos** (nodes + cluster hulls). It sits on top of 4C/4D/4E (canvas, physics, worker, LOD).
+
+No external deps.
+
+---
+
+## Highlights
+
+* **Bundle edges** with a lightweight, grid‑accelerated, quadratic midpoint scheme (SSMB): compatible edges in nearby cells share a smoothed control point → fewer crossings and clearer routes.
+* **Clusters** via label propagation (LPA). Color nodes/edges by cluster. Optional translucent **convex hulls** per cluster.
+* **Hover halos**: soft glow on hovered node and its incident edges; optional cluster hull highlight on hover.
+* Integrates with **LOD sampling** and **worker positions** seamlessly.
+
+---
+
+## 1) `engine/renderer/graph/cluster.ts` (new) — label propagation
+
+```ts
+// engine/renderer/graph/cluster.ts
+// Stage 4F — Simple label propagation clustering (unweighted, undirected)
+
+import type { SnapshotSlim } from "../../core/perf/timelineDelta";
+
+export type ClusterMap = Record<string, number>; // node id -> cluster id (int)
+
+export function labelPropagation(s: SnapshotSlim, maxIters = 12): ClusterMap {
+  const ids = Object.keys(s.monads); ids.sort();
+  const label: ClusterMap = {}; const nbrs: Record<string,string[]> = {};
+  ids.forEach((id,i)=>{ label[id]=i; nbrs[id]=[...new Set(s.monads[id].neighbors||[])] });
+  for (let it=0; it<maxIters; it++){
+    let changed = 0;
+    for (const id of ids){
+      const counts: Record<number, number> = {};
+      for (const nb of nbrs[id]){ const l = label[nb]; counts[l] = (counts[l]||0)+1; }
+      let best = label[id]; let bestC = -1; for (const k in counts){ const kl = +k; const c = counts[kl]; if (c>bestC || (c===bestC && kl<best)){ best=kl; bestC=c; }
+      }
+      if (best !== label[id]){ label[id] = best; changed++; }
+    }
+    if (!changed) break;
+  }
+  // Reindex to small integers
+  const uniq = [...new Set(Object.values(label))].sort((a,b)=>a-b); const remap = new Map<number,number>(); uniq.forEach((v,i)=>remap.set(v,i));
+  for (const id in label) label[id] = remap.get(label[id])!;
+  return label;
+}
+```
+
+---
+
+## 2) `engine/renderer/canvas/hull.ts` (new) — convex hull util
+
+```ts
+// engine/renderer/canvas/hull.ts
+// Stage 4F — Monotone chain convex hull
+
+export interface Pt { x:number; y:number }
+
+export function convexHull(pts: Pt[]): Pt[] {
+  if (pts.length <= 2) return pts.slice();
+  const P = pts.slice().sort((a,b)=>a.x===b.x? a.y-b.y : a.x-b.x);
+  const cross = (o:Pt,a:Pt,b:Pt)=> (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
+  const lower: Pt[] = []; for (const p of P){ while (lower.length>=2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop(); lower.push(p); }
+  const upper: Pt[] = []; for (let i=P.length-1;i>=0;i--){ const p=P[i]; while (upper.length>=2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop(); upper.push(p); }
+  upper.pop(); lower.pop(); return lower.concat(upper);
+}
+```
+
+---
+
+## 3) `engine/renderer/canvas/bundling.ts` (new) — screen‑space midpoint bundling (SSMB)
+
+```ts
+// engine/renderer/canvas/bundling.ts
+// Stage 4F — Grid-accelerated midpoint bundling to quadratic curves
+
+export interface BundleParams { cell: number; dirMinCos: number; strength: number; smooth: number }
+export interface BundleOut { ctrl: Record<string, { x:number; y:number }> } // edge key "a|b" (sorted)
+
+export const DefaultBundle: BundleParams = { cell: 140, dirMinCos: 0.7, strength: 0.5, smooth: 0.6 };
+
+export function bundleMidpoints(
+  ids: string[],
+  pos: Record<string,{x:number;y:number}>,
+  neighbors: (id:string)=>string[],
+  params: BundleParams = DefaultBundle,
+  prev?: BundleOut
+): BundleOut {
+  const cell = params.cell; const dirMin = params.dirMinCos; const k = params.strength; const smooth = params.smooth;
+  type Edge = { a:string; b:string; key:string; mx:number; my:number; dx:number; dy:number };
+  const edges: Edge[] = [];
+  const buckets = new Map<string, Edge[]>(); const key = (ix:number,iy:number)=>ix+","+iy;
+
+  for (const a of ids){ const A = pos[a]; if (!A) continue; for (const b of neighbors(a)){ if (a >= b) continue; const B = pos[b]; if (!B) continue; const mx=(A.x+B.x)/2, my=(A.y+B.y)/2; const vx=B.x-A.x, vy=B.y-A.y; const L=Math.max(1, Math.hypot(vx,vy)); const dx=vx/L, dy=vy/L; const e={ a,b, key: a+"|"+b, mx, my, dx, dy } as Edge; edges.push(e); const ix=Math.floor(mx/cell), iy=Math.floor(my/cell); const k2=key(ix,iy); const bucket=buckets.get(k2); if (bucket) bucket.push(e); else buckets.set(k2,[e]); }
+  }
+
+  const ctrl: Record<string,{x:number;y:number}> = {};
+  for (const e of edges){ const ix=Math.floor(e.mx/cell), iy=Math.floor(e.my/cell); let sx=0, sy=0, w=0;
+    for (let dx=-1;dx<=1;dx++) for (let dy=-1;dy<=1;dy++){
+      const bs = buckets.get(key(ix+dx,iy+dy)); if (!bs) continue; for (const o of bs){ if (o===e) continue; const dot = e.dx*o.dx + e.dy*o.dy; if (dot < dirMin) continue; const dd = Math.hypot(e.mx-o.mx, e.my-o.my); const ww = 1/Math.max(1, dd); sx += o.mx * ww; sy += o.my * ww; w += ww; }
+    }
+    if (w>0){ const cx = sx/w, cy = sy/w; const prevC = prev?.ctrl[e.key]; const ex = prevC ? prevC.x*(smooth) + cx*(1-smooth) : cx; const ey = prevC ? prevC.y*(smooth) + cy*(1-smooth) : cy; // temporal smooth
+    ctrl[e.key] = { x: e.mx*(1-k) + ex*k, y: e.my*(1-k) + ey*k };
+    } else {
+      // no neighbors → default gentle arc toward segment normal
+      ctrl[e.key] = { x: e.mx + (-e.dy)*cell*0.1, y: e.my + (e.dx)*cell*0.1 };
+    }
+  }
+  return { ctrl };
+}
+```
+
+---
+
+## 4) `engine/renderer/canvas/CanvasGraph.ts` (update) — bundling + hull + halos
+
+```ts
+// CanvasGraph.ts — 4F additions (snippets around existing class)
+import { convexHull } from './hull';
+
+export class CanvasGraph {
+  // ...existing fields
+  bundleCtrl: Record<string,{x:number;y:number}> | null = null;
+  colorByCluster = false; clusterOf: Record<string, number> | null = null;
+  hoverId: string | null = null; showHulls = false;
+
+  setBundle(ctrl: Record<string,{x:number;y:number}> | null){ this.bundleCtrl = ctrl; }
+  setClusters(map: Record<string, number> | null){ this.clusterOf = map; }
+  setColorByCluster(on: boolean){ this.colorByCluster = on; }
+  setShowHulls(on: boolean){ this.showHulls = on; }
+  setHover(id: string | null){ this.hoverId = id; }
+
+  private clusterColor(idx: number){ const h = (idx*57) % 360; return `hsl(${h} 60% 45%)`; }
+
+  draw(){
+    const s = this.last; if (!s) return; const ctx = this.ctx; const { width, height } = this.canvas; ctx.save();
+    ctx.fillStyle = this.theme.bg; ctx.fillRect(0,0,width,height); drawGrid(ctx, this.cam, width, height, this.theme.grid);
+    const P = this.externalPos; const stride = Math.max(1, this.lod.sampleStride|0);
+
+    // Optional cluster hulls (background)
+    if (this.showHulls && this.clusterOf && P){ const by: Record<number,{x:number;y:number}[]> = {}; for (const id in s.monads){ const c=this.clusterOf[id]; if (c==null) continue; (by[c] ||= []).push(P[id]); }
+      ctx.globalAlpha = 0.08; for (const c in by){ const pts = by[c].map(p=>worldToScreen(p as any, this.cam)); const hull = convexHull(pts); if (hull.length>=3){ ctx.beginPath(); ctx.moveTo(hull[0].x, hull[0].y); for (let i=1;i<hull.length;i++) ctx.lineTo(hull[i].x, hull[i].y); ctx.closePath(); ctx.fillStyle = this.clusterColor(+c); ctx.fill(); } } ctx.globalAlpha = 1; }
+
+    // Edges (with optional bundling)
+    ctx.lineWidth = 1; let drawn = 0; let cursor = this.frameEdgeCursor; const useBundle = !!this.bundleCtrl;
+    outer: for (const id in s.monads){ const m = s.monads[id]; const a = P?.[id] || m; const nb = m.neighbors||[];
+      for (let ei=0; ei<nb.length; ei++){ const t = nb[ei]; if (id >= t) continue; if ((cursor++ % stride) !== 0) continue; const B = s.monads[t]; if (!B) continue; const b = P?.[t] || B; const A2=worldToScreen(a as any, this.cam), B2=worldToScreen(b as any, this.cam);
+        const key = id+"|"+t; const col = this.colorByCluster && this.clusterOf ? this.clusterColor(this.clusterOf[id] ?? 0) : this.theme.edge; ctx.strokeStyle = col; ctx.globalAlpha = ((a as any).alpha*(b as any).alpha) * 0.95;
+        ctx.beginPath();
+        if (useBundle && this.bundleCtrl![key]){ const c = worldToScreen(this.bundleCtrl![key] as any, this.cam); ctx.moveTo(A2.x, A2.y); ctx.quadraticCurveTo(c.x, c.y, B2.x, B2.y); }
+        else { routeEdge(ctx, A2.x, A2.y, B2.x, B2.y, this.edgeMode, this.curvature, id < t ? 1 : -1); }
+        ctx.stroke(); ctx.globalAlpha = 1; if (++drawn>=this.lod.edgeBudget) break outer; }
+    }
+    this.frameEdgeCursor = cursor;
+
+    // Nodes (+ hover halo)
+    for (const id in s.monads){ const m = s.monads[id]; const p = P?.[id] || m; const scr=worldToScreen(p as any, this.cam); const r = this.getNodeRadius(id);
+      if (this.hoverId===id){ ctx.save(); ctx.shadowColor = this.colorByCluster && this.clusterOf ? this.clusterColor(this.clusterOf[id]||0) : '#60a5fa'; ctx.shadowBlur = 18; ctx.beginPath(); ctx.arc(scr.x,scr.y,r+2,0,Math.PI*2); ctx.fillStyle = 'rgba(0,0,0,0)'; ctx.fill(); ctx.restore(); }
+      ctx.beginPath(); ctx.arc(scr.x, scr.y, r, 0, Math.PI*2); ctx.fillStyle = this.colorByCluster && this.clusterOf ? this.clusterColor(this.clusterOf[id]||0) : (this.sel===id ? this.theme.nodeSel : this.theme.node); ctx.fill(); }
+
+    // Labels (respect LOD)
+    if (this.cam.z >= (this.lod.labelMinZoom || 0)){ ctx.fillStyle = this.theme.label; ctx.textAlign='center'; ctx.textBaseline='top'; for (const id in s.monads){ const p=P?.[id]||s.monads[id]; const scr=worldToScreen(p as any, this.cam); const st=this.externalStyle?.[id]; const scale=st?.labelScale??1; const alpha=(st?.labelAlpha??1)*((p as any).alpha??1); ctx.save(); ctx.globalAlpha=alpha; ctx.font = `${12*scale}px ui-monospace, monospace`; ctx.fillText(id, scr.x, scr.y + this.getNodeRadius(id) + 2); ctx.restore(); } }
+
+    ctx.restore();
+  }
+}
+```
+
+---
+
+## 5) `playground/components/GraphCanvas.tsx` (update) — hover + bundling & clusters
+
+```tsx
+// playground/components/GraphCanvas.tsx — 4F updates (excerpt)
+import React, { useEffect, useRef, useState } from 'react';
+import { CanvasGraph } from '../../engine/renderer/canvas/CanvasGraph';
+import { bundleMidpoints, DefaultBundle } from '../../engine/renderer/canvas/bundling';
+import { labelPropagation } from '../../engine/renderer/graph/cluster';
+
+export const GraphCanvas: React.FC<{
+  snapshot: any; // SnapshotSlim
+  // ...existing props...
+  bundle?: boolean; bundleStrength?: number; colorByCluster?: boolean; showHulls?: boolean;
+}>
+= ({ snapshot, /* existing props */ bundle=true, bundleStrength=0.6, colorByCluster=true, showHulls=false, ...rest }) => {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const graphRef = useRef<CanvasGraph | null>(null);
+  const [bundleState, setBundleState] = useState<any>(null);
+  const [clusters, setClusters] = useState<Record<string,number>|null>(null);
+
+  // init graph
+  useEffect(() => { const c = ref.current!; const g = new CanvasGraph(c); graphRef.current = g; const ro=new ResizeObserver(()=>{ const r=c.getBoundingClientRect(); g.resize(r.width|0, r.height|0); g.draw(); }); ro.observe(c.parentElement!); return ()=>ro.disconnect(); }, []);
+
+  // recompute clusters when snapshot changes
+  useEffect(() => { if (!snapshot) return; const g = graphRef.current!; g.setSnapshot(snapshot as any); const map = labelPropagation(snapshot); setClusters(map); g.setClusters(map); g.setColorByCluster(!!colorByCluster); g.setShowHulls(!!showHulls); g.draw(); }, [snapshot?.tick, colorByCluster, showHulls]);
+
+  // hover tracking
+  useEffect(() => { const c = ref.current!; const g = graphRef.current!; const mm = (e:MouseEvent)=>{ const r=c.getBoundingClientRect(); const hit = g.hitNode(e.clientX-r.left, e.clientY-r.top); g.setHover(hit); g.draw(); }; c.addEventListener('mousemove', mm); return ()=>c.removeEventListener('mousemove', mm); }, [snapshot?.tick]);
+
+  // bundling: recompute when positions move (simple interval)
+  useEffect(() => {
+    let raf=0; function tick(){ const g = graphRef.current!; const s = snapshot; if (!s) return; const ids = Object.keys(s.monads).sort(); const pos: Record<string,{x:number;y:number}> = {}; for (const id of ids){ const p = g.externalPos?.[id] || s.monads[id] as any; pos[id] = { x: (p as any).x||0, y: (p as any).y||0 }; }
+      if (bundle){ const out = bundleMidpoints(ids, pos, id => s.monads[id].neighbors||[], { ...DefaultBundle, strength: bundleStrength }, bundleState); setBundleState(out); g.setBundle(out.ctrl); } else { g.setBundle(null); }
+      g.draw(); raf = requestAnimationFrame(tick); }
+    raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf);
+  }, [snapshot?.tick, bundle, bundleStrength]);
+
+  return <canvas ref={ref} style={{ width:'100%', height: 480, display:'block', border:'1px solid #e5e7eb', borderRadius: 10 }} />;
+};
+```
+
+---
+
+## 6) `playground/components/CanvasPanel.tsx` (update) — controls
+
+```tsx
+// playground/components/CanvasPanel.tsx — 4F controls (excerpt)
+import React from 'react';
+import { GraphCanvas } from './GraphCanvas';
+
+export const CanvasPanel: React.FC<any> = (props) => {
+  const [bundle, setBundle] = React.useState(true); const [bundleStrength, setBundleStrength] = React.useState(0.6);
+  const [colorBy, setColorBy] = React.useState(true); const [hulls, setHulls] = React.useState(false);
+
+  // ...existing playback/layout controls above...
+  return (
+    <div className="mpl-canvas">
+      {/* existing control rows */}
+      <div className="mpl-row">
+        <label>Bundle <input type="checkbox" checked={bundle} onChange={e=>setBundle(e.target.checked)} /></label>
+        <label>Strength <input type="range" min={0} max={1} step={0.05} value={bundleStrength} onChange={e=>setBundleStrength(parseFloat(e.target.value))} /></label>
+        <label>Color by cluster <input type="checkbox" checked={colorBy} onChange={e=>setColorBy(e.target.checked)} /></label>
+        <label>Show hulls <input type="checkbox" checked={hulls} onChange={e=>setHulls(e.target.checked)} /></label>
+      </div>
+
+      <GraphCanvas {...props} bundle={bundle} bundleStrength={bundleStrength} colorByCluster={colorBy} showHulls={hulls} />
+    </div>
+  );
+};
+```
+
+---
+
+## 7) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4F — Hull tint + halo tweaks */
+.mpl-row label { display: inline-flex; gap: 6px; align-items: center; margin-right: 10px; }
+```
+
+---
+
+## 8) Example — `playground/pages/DebugExample4F.tsx`
+
+```tsx
+// playground/pages/DebugExample4F.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+function clusteredGraph() : ExecutionSnapshot[] {
+  const makeCluster = (prefix: string, n: number, offx: number, offy: number) => {
+    const ids = Array.from({length:n}, (_,i)=>`${prefix}${i}`);
+    const monads = ids.map((id,i)=>({ id, neighbors: [] as string[], x: offx + Math.cos(i/n*2*Math.PI)*120, y: offy + Math.sin(i/n*2*Math.PI)*120 }));
+    for (let i=0;i<n;i++) for (let j=i+1;j<n;j++) if (Math.random()<0.2){ monads[i].neighbors.push(ids[j]); monads[j].neighbors.push(ids[i]); }
+    return monads;
+  };
+  const a = makeCluster('A', 40, -260, -60);
+  const b = makeCluster('B', 36,  240,  40);
+  const c = makeCluster('C', 30,   -40, 260);
+  // sparse inter-cluster
+  for (let i=0;i<6;i++){ const u=a[(Math.random()*a.length)|0]; const v=b[(Math.random()*b.length)|0]; u.neighbors.push(v.id); v.neighbors.push(u.id); }
+  for (let i=0;i<5;i++){ const u=b[(Math.random()*b.length)|0]; const v=c[(Math.random()*c.length)|0]; u.neighbors.push(v.id); v.neighbors.push(u.id); }
+  for (let i=0;i<4;i++){ const u=c[(Math.random()*c.length)|0]; const v=a[(Math.random()*a.length)|0]; u.neighbors.push(v.id); v.neighbors.push(u.id); }
+  const snap = { tick: 0, monads: [...a, ...b, ...c], rulesFired: [] } as any;
+  return [ snap ];
+}
+
+export default function DebugExample4F(){
+  const history = useMemo(clusteredGraph, []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4F — Edge Bundling + Cluster Detection + Hover Halos</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 9) Notes
+
+* **Bundling model** (SSMB) is intentionally simple and fast. It updates midpoints per frame with a temporal smoother → visually similar to force‑directed edge bundling at a fraction of the cost.
+* **LOD synergy**: Bundling runs on the positions the canvas sees (worker or main). LOD edge sampling still limits draw cost; the bundler just picks better control points for sampled edges.
+* **Clusters**: Label propagation is deterministic given `ids.sort()`. For weighted or directed graphs, extend the vote counts accordingly.
+* **Halos**: Shadows are used for a cheap glow; for crisp halos at any scale, render an expanded stroked circle with low‑alpha fill.
+
+---
+
+## 10) Changelog — Stage 4F
+
+* New: `graph/cluster.ts` (LPA), `canvas/hull.ts` (convex hull), `canvas/bundling.ts` (SS midpoint bundling)
+* Updated: `CanvasGraph.ts` (bundled edges, cluster coloring, hulls, hover halos)
+* Updated: `GraphCanvas.tsx` (hover wiring + bundling loop + cluster recompute)
+* Updated: `CanvasPanel.tsx` (controls)
+* CSS: minor tweaks
+
+```
+```

@@ -1,0 +1,386 @@
+'use client'
+
+import { useState } from 'react'
+import Link from 'next/link'
+import { motion } from 'framer-motion'
+import { ArrowRight, BookOpen, Users, Zap, Moon, Sun, Target, Cpu, Code, Sparkles, Hexagon, Heart, Brain, Home, Activity, Layers, Mic } from 'lucide-react'
+import Image from 'next/image'
+import { UnifiedChatBox } from './components/UnifiedChatBox'
+import SessionSummary from './components/SessionSummary'
+import DeltaATracker from './components/DeltaATracker'
+import UnifiedAnalytics from './components/UnifiedAnalytics'
+import SessionAnalytics from './components/SessionAnalytics'
+import ToolsPanel from '../components/ToolsPanel'
+import { SessionManager, SessionData } from '../lib/sessionManager'
+
+interface UnifiedMessage {
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: Date
+  adequacyScore?: {
+    spinoAdequacy: {
+      alpha: number
+      deltaAlpha: number
+      chi: number
+    }
+    noesisAdequacy: {
+      substance: number
+      imagination: number
+      reason: number
+      intuition: number
+      freedom: number
+      blessedness: number
+      total: number
+    }
+    unifiedScore: number
+    confidence: number
+  }
+  emotionalState?: {
+    primaryAffect: string
+    intensity: number
+    powerChange: number
+    adequacyScore: number
+    bondageLevel: 'high' | 'medium' | 'low'
+    freedomRatio: number
+    transformationPotential: number
+    blessednessLevel: number
+  }
+  therapeuticStage?: string
+  onionLayer?: string
+  causalChain?: string[]
+  detailedAnalysis?: string
+  realTimeAnalysis?: any
+}
+
+export default function HomePage() {
+  const [messages, setMessages] = useState<UnifiedMessage[]>([])
+  const [darkMode, setDarkMode] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [language, setLanguage] = useState('en')
+  const [sessionMode, setSessionMode] = useState<'therapy' | 'philosophical'>('therapy')
+  const [showInstructions, setShowInstructions] = useState(false)
+
+  const handleSaveSession = async () => {
+    if (messages.length === 0) {
+      alert("No session to save!")
+      return
+    }
+
+    setIsSaving(true)
+    
+    try {
+      const sessionManager = SessionManager.getInstance()
+      
+      // Calculate session analytics
+      const userMessages = messages.filter(msg => msg.role === 'user')
+      const assistantMessages = messages.filter(msg => msg.role === 'assistant')
+      const adequacyScores = messages.map(msg => msg.adequacyScore?.unifiedScore).filter((score): score is number => score !== undefined && score !== null)
+      const emotions = messages.map(msg => msg.emotionalState?.primaryAffect).filter((emotion): emotion is string => emotion !== undefined && emotion !== null)
+      const therapeuticStages = messages.map(msg => msg.therapeuticStage).filter((stage): stage is string => stage !== undefined && stage !== null)
+      
+      const sessionData: SessionData = {
+        sessionId: `spino-session-${Date.now()}`,
+        messages,
+        timestamp: new Date(),
+        sessionMode,
+        language,
+        analytics: {
+          totalMessages: messages.length,
+          sessionDuration: messages.length > 0 
+            ? Math.round((messages[messages.length - 1].timestamp.getTime() - messages[0].timestamp.getTime()) / 1000 / 60)
+            : 0,
+          averageAdequacyScore: adequacyScores.length > 0 
+            ? adequacyScores.reduce((a, b) => a + b, 0) / adequacyScores.length 
+            : 0,
+          dominantEmotion: emotions.length > 0 
+            ? emotions.sort((a, b) => 
+                emotions.filter(v => v === a).length - emotions.filter(v => v === b).length
+              ).pop() || 'neutral'
+            : 'neutral',
+          userMessages: userMessages.length,
+          assistantMessages: assistantMessages.length,
+          therapeuticStages: [...new Set(therapeuticStages)],
+          adequacyTrend: adequacyScores,
+          emotionalTrend: emotions
+        }
+      }
+      
+      const saveResult = await sessionManager.saveSession(sessionData)
+      
+      let resultMessage = "Session saved successfully!"
+      if (saveResult.localStorage) resultMessage += " (localStorage)"
+      if (saveResult.firebase) resultMessage += " (Firebase)"
+      
+      setTimeout(() => {
+        alert(resultMessage)
+        setIsSaving(false)
+      }, 1000)
+    } catch (error) {
+      console.error('Error saving session:', error)
+      alert("Error saving session!")
+      setIsSaving(false)
+    }
+  }
+
+  const loadPreviousSessions = async () => {
+    try {
+      const sessionManager = SessionManager.getInstance()
+      const sessions = sessionManager.loadSessionsFromLocalStorage()
+      
+      if (sessions.length > 0) {
+        const lastSession = sessions[sessions.length - 1]
+        if (lastSession.messages && lastSession.messages.length > 0) {
+          setMessages(lastSession.messages)
+          alert(`Loaded previous session with ${lastSession.messages.length} messages`)
+        }
+      } else {
+        alert("No previous sessions found")
+      }
+    } catch (error) {
+      console.error('Error loading previous sessions:', error)
+      alert("Error loading previous sessions")
+    }
+  }
+
+  const toggleDarkMode = () => {
+    setDarkMode(!darkMode)
+  }
+
+  return (
+    <div className={`h-screen transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
+      {/* Beautiful Centered Header - Mobile Responsive */}
+      <div className="fixed top-2 sm:top-4 left-1/2 transform -translate-x-1/2 z-40 text-center px-2">
+        <motion.h1 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className={`text-xl sm:text-3xl lg:text-4xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${
+            darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'
+          }`}
+        >
+          Welcome to SpinO AI
+        </motion.h1>
+        <motion.p 
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className={`text-xs sm:text-sm mt-1 ${
+            darkMode ? 'text-gray-300' : 'text-gray-600'
+          }`}
+        >
+          Your AI companion for therapy & philosophy
+        </motion.p>
+      </div>
+
+      {/* Small Collapsible Instructions Button - Mobile Responsive */}
+      <div className="fixed top-2 sm:top-4 left-2 sm:left-4 z-30">
+        <button
+          onClick={() => setShowInstructions(!showInstructions)}
+          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
+            darkMode 
+              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+          }`}
+        >
+          {showInstructions ? '✕' : 'ℹ️ Instructions'}
+        </button>
+        
+        {showInstructions && (
+          <motion.div
+            initial={{ opacity: 0, y: -10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.95 }}
+            className={`absolute top-12 left-0 w-72 sm:w-80 p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
+              darkMode 
+                ? 'bg-gray-900/95 border-gray-600 text-white' 
+                : 'bg-white/95 border-gray-300 text-gray-900'
+            }`}
+          >
+            <h3 className="font-semibold mb-3 text-sm">Spino-AI</h3>
+            <h4 className="font-medium mb-3 text-xs text-gray-400">Welcome to SpinO AI</h4>
+            <div className="space-y-2 text-xs">
+              <p>• <strong>Therapy Mode:</strong> Engage in therapeutic conversations with AI guidance</p>
+              <p>• <strong>Philosophical Mode:</strong> Explore deep philosophical discussions</p>
+              <p>• <strong>Language:</strong> Choose from 11 supported languages</p>
+              <p>• <strong>Dark/Light Mode:</strong> Toggle your preferred theme</p>
+              <p>• <strong>Session Management:</strong> Save and load your conversations</p>
+            </div>
+          </motion.div>
+        )}
+      </div>
+
+      {/* Dark Mode Toggle - Mobile responsive */}
+      <div className="fixed top-2 right-2 sm:top-4 sm:right-4 z-30 flex gap-1 sm:gap-2">
+        <select 
+          value={language} 
+          onChange={(e) => setLanguage(e.target.value)}
+          className={`px-2 py-1 sm:px-3 sm:py-2 rounded-lg border text-xs sm:text-sm font-medium shadow-lg ${
+            darkMode 
+              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+          } transition-colors`}
+        >
+          <option value="en">English</option>
+          <option value="es">Español</option>
+          <option value="fr">Français</option>
+          <option value="de">Deutsch</option>
+          <option value="it">Italiano</option>
+          <option value="pt">Português</option>
+          <option value="ru">Русский</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+          <option value="he">עברית</option>
+        </select>
+        <button
+          onClick={toggleDarkMode}
+          className={`p-2 sm:p-3 rounded-lg border shadow-lg transition-colors ${
+            darkMode 
+              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+          }`}
+        >
+          {darkMode ? <Sun className="w-4 h-4 sm:w-5 sm:h-5" /> : <Moon className="w-4 h-4 sm:w-5 sm:h-5" />}
+        </button>
+      </div>
+
+      {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
+      <div className="h-screen flex flex-col lg:flex-row overflow-hidden pt-20 sm:pt-16">
+        {/* Main Chat Area */}
+        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 pt-24 sm:pt-20">
+          <UnifiedChatBox messages={messages} setMessages={setMessages} darkMode={darkMode} language={language} sessionMode={sessionMode} />
+        </div>
+
+        {/* Sidebar - Hidden on mobile, shown on desktop */}
+        <div className={`hidden lg:block w-80 p-4 space-y-4 flex-shrink-0 overflow-y-auto ${
+          darkMode 
+            ? 'bg-white/5 border-l border-white/10' 
+            : 'bg-black/5 border-l border-black/10'
+        }`}>
+          {/* Session Mode Toggle */}
+          <div className={`rounded-lg p-3 ${
+            darkMode 
+              ? 'bg-white/5 border border-white/10' 
+              : 'bg-black/5 border border-black/10'
+          }`}>
+            <h3 className={`text-sm font-medium mb-2 ${darkMode ? 'text-white' : 'text-black'}`}>
+              Session Mode
+            </h3>
+            <div className="space-y-2">
+              <button
+                onClick={() => setSessionMode('therapy')}
+                className={`w-full px-3 py-2 rounded text-xs transition-colors flex items-center space-x-2 ${
+                  sessionMode === 'therapy'
+                    ? darkMode 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-blue-500 text-white'
+                    : darkMode 
+                      ? 'bg-white/5 text-white/70 hover:bg-white/10' 
+                      : 'bg-black/5 text-black/70 hover:bg-black/10'
+                }`}
+              >
+                <Image src="/favicon.gif" alt="Spino" width={32} height={32} className="rounded" />
+                <span>Therapy Session</span>
+              </button>
+              <button
+                onClick={() => setSessionMode('philosophical')}
+                className={`w-full px-3 py-2 rounded text-xs transition-colors flex items-center space-x-2 ${
+                  sessionMode === 'philosophical'
+                    ? darkMode 
+                      ? 'bg-purple-600 text-white' 
+                      : 'bg-purple-500 text-white'
+                    : darkMode 
+                      ? 'bg-white/5 text-white/70 hover:bg-white/10' 
+                      : 'bg-black/5 text-black/70 hover:bg-black/10'
+                }`}
+              >
+                <Image src="/favicon.gif" alt="Spino" width={32} height={32} className="rounded" />
+                <span>Philosophical Reflection</span>
+              </button>
+            </div>
+          </div>
+          
+          {/* Session Management */}
+          <div className={`rounded-lg p-3 ${
+            darkMode 
+              ? 'bg-white/5 border border-white/10' 
+              : 'bg-black/5 border border-black/10'
+          }`}>
+            <h3 className={`text-sm font-medium mb-2 ${darkMode ? 'text-white' : 'text-black'}`}>
+              Session Management
+            </h3>
+            <div className="space-y-2">
+              <button
+                onClick={loadPreviousSessions}
+                className={`w-full px-3 py-2 rounded text-xs transition-colors flex items-center space-x-2 ${
+                  darkMode 
+                    ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                    : 'bg-blue-500 text-white hover:bg-blue-600'
+                }`}
+              >
+                <Image src="/favicon.gif" alt="Spino" width={32} height={32} className="rounded" />
+                <span>Load Previous Session</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Tools */}
+          <ToolsPanel />
+          
+          <div className="space-y-3">
+            <SessionSummary 
+              messages={messages} 
+              darkMode={darkMode} 
+              isSaving={isSaving}
+              onSaveSession={handleSaveSession}
+            />
+            <SessionAnalytics darkMode={darkMode} />
+          </div>
+        </div>
+        
+        {/* Mobile Navigation Menu - Shown only on mobile */}
+        <div className="lg:hidden fixed top-20 left-4 right-4 z-40">
+          <div className={`rounded-xl p-3 shadow-lg ${
+            darkMode 
+              ? 'bg-white/10 border border-white/20 backdrop-blur-sm' 
+              : 'bg-black/10 border border-black/20 backdrop-blur-sm'
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex space-x-1">
+                <button
+                  onClick={() => setSessionMode('therapy')}
+                  className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1 ${
+                    sessionMode === 'therapy'
+                      ? darkMode 
+                        ? 'bg-blue-600 text-white' 
+                        : 'bg-blue-500 text-white'
+                      : darkMode 
+                        ? 'bg-white/10 text-white/70 hover:bg-white/20' 
+                        : 'bg-black/10 text-black/70 hover:bg-black/20'
+                  }`}
+                >
+                  <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+                  <span>Therapy</span>
+                </button>
+                <button
+                  onClick={() => setSessionMode('philosophical')}
+                  className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1 ${
+                    sessionMode === 'philosophical'
+                      ? darkMode 
+                        ? 'bg-purple-600 text-white' 
+                        : 'bg-purple-500 text-white'
+                      : darkMode 
+                        ? 'bg-white/10 text-white/70 hover:bg-white/20' 
+                        : 'bg-black/10 text-black/70 hover:bg-black/20'
+                  }`}
+                >
+                  <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+                  <span>Philosophy</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

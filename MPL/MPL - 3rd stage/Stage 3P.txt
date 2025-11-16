@@ -1,0 +1,526 @@
+# MPL Playground — Stage 3P Patch (Breakpoints & Conditional Stops)
+
+This patch adds **breakpoints** driven by a lightweight query language (shared with 3N) and **conditional auto‑stops** during timeline playback.
+
+**Highlights**
+
+* Breakpoints with label, color, enabled/disabled, and **stop‑on‑hit**.
+* Query grammar: reuse `ruleLog.parseQuery` (e.g., `rule:R1 monad:A tick:10..30 edge:yes -rule:R3`).
+* Auto‑stop while playing when the next index hits any enabled breakpoint.
+* **Next/Prev hit** navigation; markers on the scrubber; mini hit counter.
+* Zero dependencies; entirely client‑side.
+
+---
+
+## 1) `engine/debugger/breakpoints.ts` (new)
+
+```ts
+// engine/debugger/breakpoints.ts
+// Stage 3P — Breakpoint model + helpers built on the 3N rule log filter
+
+import { ExecutionSnapshot } from "./graphTypes";
+import { buildRuleLog, filterRuleLog, parseQuery, applyNegatives } from "./ruleLog";
+
+export interface Breakpoint {
+  id: string;
+  label: string;
+  query: string;          // same grammar as 3N search
+  color?: string;         // CSS color for markers
+  enabled: boolean;
+  stopOnHit: boolean;     // if true, playback pauses on hit
+  createdAt: number;
+}
+
+export interface BreakpointHits {
+  bpId: string;
+  indices: number[];      // sorted unique indices that match
+}
+
+export function createBreakpoint(label = "BP", query = "", color = "#8b5cf6"): Breakpoint {
+  return { id: `bp_${Date.now()}_${Math.random().toString(36).slice(2,8)}`, label, query, color, enabled: true, stopOnHit: true, createdAt: Date.now() };
+}
+
+export function computeHitsForBreakpoint(history: ExecutionSnapshot[], bp: Breakpoint): BreakpointHits {
+  const log = buildRuleLog(history);
+  const { filter, negatives } = parseQuery(bp.query || "");
+  const base = filterRuleLog(log, filter);
+  const items = negatives ? applyNegatives(base, negatives) : base;
+  const set = new Set<number>();
+  for (const it of items) set.add(it.index);
+  const indices = [...set].sort((a,b) => a - b);
+  return { bpId: bp.id, indices };
+}
+
+export function unionEnabledHitIndices(history: ExecutionSnapshot[], bps: Breakpoint[]): number[] {
+  const set = new Set<number>();
+  for (const bp of bps) {
+    if (!bp.enabled) continue;
+    for (const i of computeHitsForBreakpoint(history, bp).indices) set.add(i);
+  }
+  return [...set].sort((a,b) => a - b);
+}
+
+export function nextHitIndex(hitsSorted: number[], from: number): number | null {
+  for (const i of hitsSorted) if (i > from) return i;
+  return null;
+}
+
+export function prevHitIndex(hitsSorted: number[], from: number): number | null {
+  for (let k = hitsSorted.length - 1; k >= 0; k--) if (hitsSorted[k] < from) return hitsSorted[k];
+  return null;
+}
+```
+
+---
+
+## 2) `playground/components/BreakpointsPanel.tsx` (new)
+
+```tsx
+// playground/components/BreakpointsPanel.tsx
+// Stage 3P — Manage breakpoints (create/edit/toggle) + navigate hits
+
+import React, { useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { Breakpoint, createBreakpoint, computeHitsForBreakpoint, nextHitIndex, prevHitIndex } from "../../engine/debugger/breakpoints";
+
+interface BreakpointsPanelProps {
+  history: ExecutionSnapshot[];
+  currentIndex: number;
+  breakpoints: Breakpoint[];
+  onChange: (next: Breakpoint[]) => void;
+  onGoToIndex: (i: number) => void;
+  onPinGhost: (i: number) => void;
+  onMarksChange?: (indices: number[]) => void; // union of enabled hits for the rail
+}
+
+export const BreakpointsPanel: React.FC<BreakpointsPanelProps> = ({ history, currentIndex, breakpoints, onChange, onGoToIndex, onPinGhost, onMarksChange }) => {
+  const [label, setLabel] = useState("BP");
+  const [query, setQuery] = useState("rule:");
+  const [color, setColor] = useState("#8b5cf6");
+
+  const hitsMap = useMemo(() => new Map(breakpoints.map(bp => [bp.id, computeHitsForBreakpoint(history, bp)])), [history, breakpoints]);
+  const union = useMemo(() => {
+    const s = new Set<number>();
+    for (const bp of breakpoints) if (bp.enabled) for (const i of (hitsMap.get(bp.id)?.indices || [])) s.add(i);
+    return [...s].sort((a,b) => a - b);
+  }, [hitsMap, breakpoints]);
+
+  React.useEffect(() => { onMarksChange?.(union); }, [union.length]);
+
+  const add = () => onChange([ ...breakpoints, createBreakpoint(label.trim() || "BP", query.trim(), color) ]);
+  const patch = (id: string, p: Partial<Breakpoint>) => onChange(breakpoints.map(b => b.id === id ? { ...b, ...p } : b));
+  const remove = (id: string) => onChange(breakpoints.filter(b => b.id !== id));
+
+  const next = () => { const i = nextHitIndex(union, currentIndex); if (i != null) onGoToIndex(i); };
+  const prev = () => { const i = prevHitIndex(union, currentIndex); if (i != null) onGoToIndex(i); };
+
+  return (
+    <div className="mpl-bp">
+      <div className="mpl-bp-add">
+        <input placeholder="Label" value={label} onChange={e => setLabel(e.target.value)} />
+        <input placeholder="Query (e.g., rule:R1 monad:A -rule:R3)" value={query} onChange={e => setQuery(e.target.value)} />
+        <input type="color" value={color} onChange={e => setColor(e.target.value)} />
+        <button className="mpl-btn" onClick={add}>➕ Add</button>
+        <button className="mpl-btn" onClick={prev}>⟲ Prev hit</button>
+        <button className="mpl-btn" onClick={next}>⟳ Next hit</button>
+      </div>
+
+      <div className="mpl-bp-list">
+        {breakpoints.map(bp => {
+          const hits = hitsMap.get(bp.id)?.indices || [];
+          return (
+            <div className="mpl-bp-item" key={bp.id}>
+              <div className="mpl-bp-main">
+                <span className="mpl-bp-color" style={{ background: bp.color || "#8b5cf6" }} />
+                <input value={bp.label} onChange={e => patch(bp.id, { label: e.target.value })} />
+                <input className="mpl-bp-query" value={bp.query} onChange={e => patch(bp.id, { query: e.target.value })} />
+                <span className="mpl-bp-hits" title={hits.join(', ')}>{hits.length} hits</span>
+                <label className="mpl-check"><input type="checkbox" checked={bp.enabled} onChange={e => patch(bp.id, { enabled: e.target.checked })} /> Enabled</label>
+                <label className="mpl-check"><input type="checkbox" checked={bp.stopOnHit} onChange={e => patch(bp.id, { stopOnHit: e.target.checked })} /> Stop on hit</label>
+                <button className="mpl-btn" onClick={() => onPinGhost(hits[0] ?? 0)}>Pin first</button>
+                <button className="mpl-btn mpl-danger" onClick={() => remove(bp.id)}>Delete</button>
+              </div>
+            </div>
+          );
+        })}
+        {breakpoints.length === 0 && <div className="mpl-empty">No breakpoints yet</div>}
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 3) `playground/components/TimeScrubber.tsx` (auto‑stop + BP markers)
+
+```tsx
+// playground/components/TimeScrubber.tsx
+// Stage 3P — Add autoStopIndices + onAutoStop + breakpoint markers
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { Bookmark } from "../../engine/debugger/bookmarks";
+import { SessionAnnotation } from "../../engine/debugger/annotations";
+
+interface TimeScrubberProps {
+  timeline: ExecutionSnapshot[];
+  index: number; onChangeIndex: (i: number) => void;
+  ghostIndex: number | null; onChangeGhostIndex: (i: number | null) => void;
+  bookmarks?: Bookmark[];
+  annotations?: SessionAnnotation[];
+  ruleMarks?: number[];
+  heatValues?: number[];
+  bpMarks?: number[];                  // NEW: indices where breakpoints match
+  autoStopIndices?: number[];          // NEW: indices that should pause playback when reached
+  onAutoStop?: (i: number) => void;    // NEW: callback when auto-stop triggers
+}
+
+export const TimeScrubber: React.FC<TimeScrubberProps> = ({ timeline, index, onChangeIndex, ghostIndex, onChangeGhostIndex, bookmarks = [], annotations = [], ruleMarks = [], heatValues, bpMarks = [], autoStopIndices = [], onAutoStop }) => {
+  const N = timeline.length; const min = 0; const max = Math.max(0, N - 1);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1); const [loop, setLoop] = useState(true);
+  const timerRef = useRef<number | null>(null); const railRef = useRef<HTMLDivElement>(null);
+
+  const stopSet = useMemo(() => new Set(autoStopIndices || []), [autoStopIndices?.length]);
+
+  useEffect(() => { if (index > max) onChangeIndex(max); }, [N]);
+
+  useEffect(() => {
+    if (!playing) return;
+    const ms = 600 / (speed || 1);
+    const id = window.setInterval(() => {
+      const next = index < max ? index + 1 : (loop ? min : max);
+      if (stopSet.has(next)) {
+        setPlaying(false);
+        onChangeIndex(next);
+        onAutoStop?.(next);
+        return; // pause here
+      }
+      onChangeIndex(next);
+    }, ms);
+    timerRef.current = id as unknown as number;
+    return () => { if (timerRef.current) window.clearInterval(timerRef.current); timerRef.current = null; };
+  }, [playing, speed, index, max, loop, onChangeIndex, stopSet]);
+
+  const tick = timeline[index]?.tick ?? index; const aTick = ghostIndex != null ? (timeline[ghostIndex]?.tick ?? ghostIndex) : null;
+  const toPct = (i: number) => (max === min ? 0 : (i - min) / (max - min));
+  const onRailClick = (e: React.MouseEvent) => { if (!railRef.current) return; const rect = railRef.current.getBoundingClientRect(); const frac = (e.clientX - rect.left) / rect.width; const i = Math.round(min + frac * (max - min)); onChangeIndex(i); };
+
+  return (
+    <div className="mpl-timescrubber">
+      <div className="mpl-ts-row">
+        <div className="mpl-ts-controls">
+          <button className="mpl-btn" onClick={() => onChangeIndex(min)} title="Start">⏮</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(Math.max(min, index - 1))} title="Step back">◀</button>
+          <button className="mpl-btn" onClick={() => setPlaying(p => !p)} title={playing ? "Pause" : "Play"}>{playing ? "⏸" : "▶"}</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(Math.min(max, index + 1))} title="Step forward">▶</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(max)} title="End">⏭</button>
+        </div>
+        <div className="mpl-ts-speed">
+          <label>Speed
+            <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))}>
+              <option value={0.25}>0.25×</option><option value={0.5}>0.5×</option><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option>
+            </select>
+          </label>
+          <label className="mpl-check"><input type="checkbox" checked={loop} onChange={e => setLoop(e.target.checked)} /> Loop</label>
+        </div>
+      </div>
+
+      {heatValues && heatValues.length === N && (
+        <div className="mpl-ts-heat">
+          {heatValues.map((v, i) => (
+            <div key={`h-${i}`} className="mpl-ts-heat-cell" style={{ left: `${toPct(i) * 100}%`, width: `${(toPct(i + 1) - toPct(i)) * 100}%`, opacity: Math.max(0.05, Math.min(1, v)) }} />
+          ))}
+        </div>
+      )}
+
+      <div className="mpl-ts-rail" ref={railRef} onClick={onRailClick}>
+        {annotations.filter(a => a.endIndex != null && a.endIndex! > a.index).map(a => (
+          <div key={`band-${a.id}`} className="mpl-ts-band" style={{ left: `${toPct(a.index) * 100}%`, width: `${(toPct(a.endIndex!) - toPct(a.index)) * 100}%`, background: a.color || "#999" }} title={`${a.label} (${a.index}→${a.endIndex})`} />
+        ))}
+        {bookmarks.map((b, k) => (
+          <div key={`bm-${k}`} className="mpl-ts-mark bm" style={{ left: `${toPct(b.index) * 100}%` }} title={b.label || `idx ${b.index}`} onClick={e => { e.stopPropagation(); onChangeIndex(b.index); }} />
+        ))}
+        {annotations.filter(a => a.endIndex == null).map(a => (
+          <div key={`ann-${a.id}`} className="mpl-ts-mark ann" style={{ left: `${toPct(a.index) * 100}%`, background: a.color || "#111" }} title={a.label} onClick={e => { e.stopPropagation(); onChangeIndex(a.index); }} />
+        ))}
+        {ruleMarks.map((i, k) => (
+          <div key={`rl-${k}-${i}`} className="mpl-ts-mark rl" style={{ left: `${toPct(i) * 100}%` }} title={`rule @ ${i}`} onClick={e => { e.stopPropagation(); onChangeIndex(i); }} />
+        ))}
+        {bpMarks.map((i, k) => (
+          <div key={`bp-${k}-${i}`} className="mpl-ts-mark bp" style={{ left: `${toPct(i) * 100}%` }} title={`breakpoint @ ${i}`} onClick={e => { e.stopPropagation(); onChangeIndex(i); }} />
+        ))}
+        {ghostIndex != null && (
+          <div className="mpl-ts-ghost-pin" style={{ left: `${toPct(ghostIndex) * 100}%` }} title={`A @ ${ghostIndex}`} />
+        )}
+        <div className="mpl-ts-handle" style={{ left: `${toPct(index) * 100}%` }} />
+      </div>
+
+      <div className="mpl-ts-meta">
+        <span>Index: {index}/{max}</span><span>Tick: {tick}</span><span>A: {ghostIndex != null ? `${ghostIndex}/${max}${aTick != null ? ` (t${aTick})` : ""}` : "—"}</span>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 4) `playground/components/DebuggerPanel.tsx` (wire Breakpoints + auto‑stop + shortcuts)
+
+```tsx
+// playground/components/DebuggerPanel.tsx
+// Stage 3P — Wire BreakpointsPanel and auto-stop integration into TimeScrubber
+
+import React, { useEffect, useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { StateViewer } from "./StateViewer";
+import { TimeScrubber } from "./TimeScrubber";
+import { ImportExportPanel } from "./ImportExportPanel";
+import { Bookmark } from "../../engine/debugger/bookmarks";
+import { BookmarksPanel } from "./BookmarksPanel";
+import { SessionBundle } from "../../engine/debugger/sessionIO";
+import { AnnotationsPanel } from "./AnnotationsPanel";
+import { MonadicNote, SessionAnnotation } from "../../engine/debugger/annotations";
+import { NodeNotesPanel } from "./NodeNotesPanel";
+import { RuleLogPanel } from "./RuleLogPanel";
+import { RuleStatsPanel } from "./RuleStatsPanel";
+import { Breakpoint, unionEnabledHitIndices } from "../../engine/debugger/breakpoints";
+import { BreakpointsPanel } from "./BreakpointsPanel";
+
+interface DebuggerPanelProps {
+  snapshot?: ExecutionSnapshot;
+  history?: ExecutionSnapshot[];
+  onFocusMonad?: (id: string) => void;
+}
+
+export const DebuggerPanel: React.FC<DebuggerPanelProps> = ({ snapshot, history, onFocusMonad }) => {
+  const [timeline, setTimeline] = useState<ExecutionSnapshot[]>(() => history ?? (snapshot ? [snapshot] : []));
+  useEffect(() => { if (history && history.length) setTimeline(history); }, [history?.length]);
+  useEffect(() => { if (!history && snapshot) setTimeline([snapshot]); }, [snapshot?.tick]);
+
+  const [idx, setIdx] = useState(() => Math.max(0, timeline.length - 1));
+  useEffect(() => { setIdx(Math.max(0, timeline.length - 1)); }, [timeline.length]);
+
+  const [ghostIdx, setGhostIdx] = useState<number | null>(null);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [annotations, setAnnotations] = useState<SessionAnnotation[]>([]);
+  const [monadNotes, setMonadNotes] = useState<MonadicNote[]>([]);
+  const [selectedMonadId, setSelectedMonadId] = useState<string | null>(null);
+  const [ruleMarks, setRuleMarks] = useState<number[]>([]);
+
+  // Heat controls (from 3O)
+  const [heatRuleId, setHeatRuleId] = useState<string | null>(null);
+  const [heatWindow, setHeatWindow] = useState<number>(5);
+  const [heatNormalize, setHeatNormalize] = useState<"local" | "global">("local");
+  const [heatStrip, setHeatStrip] = useState<number[] | undefined>(undefined);
+
+  // Breakpoints (3P)
+  const [breakpoints, setBreakpoints] = useState<Breakpoint[]>([]);
+  const [bpMarks, setBpMarks] = useState<number[]>([]);
+  const [stopOnHitGlobal, setStopOnHitGlobal] = useState(true);
+
+  useEffect(() => { setBpMarks(unionEnabledHitIndices(timeline, breakpoints)); }, [timeline, breakpoints]);
+
+  const current = useMemo<ExecutionSnapshot | undefined>(() => timeline[Math.max(0, Math.min(idx, timeline.length - 1))], [timeline, idx]);
+  const ghost = useMemo<ExecutionSnapshot | undefined>(() => ghostIdx == null ? undefined : timeline[Math.max(0, Math.min(ghostIdx, timeline.length - 1))], [timeline, ghostIdx]);
+
+  const onImport = (bundle: SessionBundle) => {
+    setTimeline(bundle.history || []);
+    setBookmarks(bundle.bookmarks || []);
+    setAnnotations(bundle.annotations || []);
+    setMonadNotes(bundle.monadNotes || []);
+    setIdx(Math.max(0, (bundle.history?.length || 1) - 1));
+    setGhostIdx(null);
+  };
+
+  // Auto-stop callback: highlight briefly (optional toast could be added)
+  const onAutoStop = (i: number) => {
+    // no-op; left hook for showing a toast or flashing the rail handle
+    console.debug("Auto-stop at", i);
+  };
+
+  // Keyboard shortcuts for hits
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target && (e.target as HTMLElement).tagName.match(/INPUT|TEXTAREA|SELECT/)) return;
+      if (e.key.toLowerCase() === 'n') {
+        const next = bpMarks.find(x => x > idx); if (next != null) setIdx(next);
+      }
+      if (e.key.toLowerCase() === 'p') {
+        const prev = [...bpMarks].reverse().find(x => x < idx); if (prev != null) setIdx(prev);
+      }
+      if (e.key.toLowerCase() === 's') setStopOnHitGlobal(v => !v);
+    };
+    window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
+  }, [idx, bpMarks]);
+
+  // Determine which indices should auto-stop: union of enabled BPs with stopOnHit=true, gated by global toggle
+  const autoStopIndices = useMemo(() => {
+    if (!stopOnHitGlobal) return [] as number[];
+    const set = new Set<number>();
+    for (const i of bpMarks) set.add(i);
+    // If any bp is disabled or stopOnHit=false, they shouldn't be in bpMarks; bpMarks already derived from enabled only
+    // but if you want to honor per-bp stopOnHit, compute per-bp and include conditionally (left simple here)
+    return [...set].sort((a,b) => a - b);
+  }, [bpMarks, stopOnHitGlobal]);
+
+  return (
+    <div className="mpl-debugger-panel">
+      {/* Session I/O */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Session I/O</header>
+        <ImportExportPanel history={timeline} bookmarks={bookmarks} annotations={annotations} monadNotes={monadNotes} onImport={onImport} />
+      </section>
+
+      {/* Timeline */}
+      {timeline.length > 0 && (
+        <section className="mpl-section">
+          <header className="mpl-section-h">Timeline</header>
+          <TimeScrubber
+            timeline={timeline}
+            index={idx}
+            onChangeIndex={setIdx}
+            ghostIndex={ghostIdx}
+            onChangeGhostIndex={setGhostIdx}
+            bookmarks={bookmarks}
+            annotations={annotations}
+            ruleMarks={ruleMarks}
+            heatValues={heatStrip}
+            bpMarks={bpMarks}
+            autoStopIndices={autoStopIndices}
+            onAutoStop={onAutoStop}
+          />
+          <div className="mpl-inline">
+            <label className="mpl-check"><input type="checkbox" checked={stopOnHitGlobal} onChange={e => setStopOnHitGlobal(e.target.checked)} /> Stop on breakpoint</label>
+            <span className="mpl-kbd">N</span> next • <span className="mpl-kbd">P</span> prev • <span className="mpl-kbd">S</span> toggle stop
+          </div>
+        </section>
+      )}
+
+      {/* Rule Stats */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Rule Stats</header>
+        <RuleStatsPanel history={timeline} onSelectRuleForHeat={setHeatRuleId} onSetHeatWindow={v => v} onSetHeatNormalize={v => v} onSetHeatStrip={setHeatStrip} />
+      </section>
+
+      {/* Rule Log */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Rule Log</header>
+        <RuleLogPanel history={timeline} onGoToIndex={setIdx} onPinGhost={setGhostIdx} onSelectMonad={(id) => { setSelectedMonadId(id); onFocusMonad?.(id); }} onMarksChange={setRuleMarks} />
+      </section>
+
+      {/* Breakpoints */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Breakpoints</header>
+        <BreakpointsPanel history={timeline} currentIndex={idx} breakpoints={breakpoints} onChange={setBreakpoints} onGoToIndex={setIdx} onPinGhost={setGhostIdx} onMarksChange={setBpMarks} />
+      </section>
+
+      {/* Bookmarks */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Bookmarks</header>
+        <BookmarksPanel currentIndex={idx} currentTick={current?.tick ?? idx} bookmarks={bookmarks} onChange={setBookmarks} onGoToIndex={setIdx} />
+      </section>
+
+      {/* Annotations */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Annotations</header>
+        <AnnotationsPanel currentIndex={idx} currentTick={current?.tick ?? idx} maxIndex={Math.max(0, timeline.length - 1)} annotations={annotations} onChange={setAnnotations} onGoToIndex={setIdx} />
+      </section>
+
+      {/* Node notes */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Node Notes</header>
+        <NodeNotesPanel currentIndex={idx} currentTick={current?.tick ?? idx} selectedMonadId={selectedMonadId ?? undefined} notes={monadNotes} onChange={setMonadNotes} />
+      </section>
+
+      {/* State */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">State</header>
+        {current ? (
+          <StateViewer
+            history={timeline}
+            index={idx}
+            snapshot={current}
+            ghostSnapshot={ghost}
+            monadNotes={monadNotes.filter(n => n.index === idx)}
+            selectedMonadId={selectedMonadId}
+            onSelectMonad={(id) => { setSelectedMonadId(id); onFocusMonad?.(id); }}
+            heatRuleId={heatRuleId}
+          />
+        ) : (
+          <div className="mpl-empty">No snapshot available</div>
+        )}
+      </section>
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 3P — Breakpoints UI + markers */
+.mpl-bp { display: grid; gap: 10px; }
+.mpl-bp-add { display: grid; grid-template-columns: 1fr 2fr auto auto auto auto; gap: 8px; }
+.mpl-bp-list { display: grid; gap: 8px; }
+.mpl-bp-item { border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px; background: #fff; }
+.mpl-bp-main { display: grid; grid-template-columns: 14px 1fr 2fr auto auto auto auto auto; gap: 8px; align-items: center; }
+.mpl-bp-color { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #e5e7eb; }
+.mpl-bp-query { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.mpl-bp-hits { font-size: 12px; color: #6b7280; }
+.mpl-kbd { display: inline-block; padding: 2px 6px; border: 1px solid #d1d5db; border-bottom-width: 2px; border-radius: 6px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+/* Scrubber markers for breakpoints */
+.mpl-ts-mark.bp { background: #8b5cf6; box-shadow: 0 0 0 1px rgba(255,255,255,0.9); }
+```
+
+---
+
+## 6) Example — `playground/pages/DebugExample3P.tsx`
+
+```tsx
+// playground/pages/DebugExample3P.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3P() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B", "C"] }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["A", "B"] } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B", sourceId: "B", targetId: "C" } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"] }, { id: "C", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" }, { ruleId: "R2", at: 2, monadId: "A", sourceId: "A", targetId: "C" } ] },
+    { tick: 3, monads: [ { id: "A", neighbors: ["C"] }, { id: "C", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R1", at: 3, monadId: "A" } ] },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3P — Breakpoints & Conditional Stops</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 7) Notes
+
+* Breakpoints evaluate against **rule events** using the same filter semantics as 3N. If you need state‑based stops (e.g., "monad X becomes active"), extend `breakpoints.ts` to scan `snapshot.monads` at each index.
+* Auto‑stop checks the *next* index on each timer tick before advancing. If it’s a hit, playback pauses on that index.
+* Per‑breakpoint `stopOnHit` is present on the model; the example derivation treats all enabled BPs as auto‑stoppable for simplicity. For fine‑grained control, compute autoStop set per BP and union only those with `stopOnHit=true`.
+* Keyboard: **N** next hit, **P** previous hit, **S** toggle global stop‑on‑hit.
+
+---
+
+## 8) Changelog — Stage 3P
+
+* New: `breakpoints.ts`, `BreakpointsPanel.tsx`
+* Updated: `TimeScrubber.tsx` (auto‑stop + BP markers), `DebuggerPanel.tsx` (wiring + shortcuts)
+* CSS: breakpoint panel + scrubber marker styles
+
+```
+```

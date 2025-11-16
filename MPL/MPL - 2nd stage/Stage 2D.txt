@@ -1,0 +1,176 @@
+# MPL Stage 2D – Emotional / Adequacy Patch
+
+This patch layers **emotional state** and **adequacy** metadata on top of Stage‑2A/2B/2C. It keeps the core runtime unchanged and uses `memory.*` fields + `env.mut` to track affect during rule execution.
+
+## What’s included
+
+* `src/emotional/types.ts` — expanded types + helpers
+* `examples/run.ts` — updated: rules now bump `memory.emotion` and `memory.adequacy` while Life runs; demo prints both grid and per‑cell affect
+
+> No engine changes are required (2D rides on `env.mut.set/add/sub(...)` from 2C).
+
+---
+
+## src/emotional/types.ts
+
+```ts
+// Stage 2D – Emotional & Adequacy types + tiny helpers
+export type Adequacy = {
+  /** Overall adequacy/confidence in current behavior [0..1] */
+  alpha: number;
+  /** Optional secondary factor capturing variability or risk [0..1] */
+  chi?: number;
+  /** Optional short‑term delta applied at this tick (can be negative) */
+  dA?: number;
+};
+
+export type EmotionalState = {
+  joy?: number;       // increases on births/success
+  sadness?: number;   // increases on deaths/failures
+  stress?: number;    // increases on overcrowding/scarcity
+  calm?: number;      // increases in "ideal" conditions
+  meta?: Record<string, number>;
+};
+
+export type EmotionalMetadata = {
+  adequacy?: Adequacy;
+  emotion?: EmotionalState;
+};
+
+// -------- Helpers --------
+export function clamp01(x: number | undefined): number {
+  const v = Number(x ?? 0);
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+export function decay(v: number | undefined, rate = 0.05): number {
+  // simple exponential-ish decay per tick
+  const x = Number(v ?? 0);
+  return clamp01(x * (1 - clamp01(rate)));
+}
+
+export function blend(a: number | undefined, b: number | undefined, t = 0.5): number {
+  return clamp01((Number(a ?? 0) * (1 - t)) + (Number(b ?? 0) * t));
+}
+
+export function bump(v: number | undefined, delta: number): number {
+  return clamp01(Number(v ?? 0) + delta);
+}
+```
+
+---
+
+## examples/run.ts
+
+```ts
+import { Interpreter, type Rule } from '../src/runtime/interpreter.js';
+import { Grid2D } from '../src/runtime/grid.js';
+import { Monad } from '../src/runtime/monad.js';
+import { Moore } from '../src/runtime/topology/index.js';
+import { Tracer } from '../src/debug/trace.js';
+import { bump, decay } from '../src/emotional/types.js';
+
+// Conway's Game of Life + Stage 2D emotional/adequacy signals.
+// We increment affect in memory via env.mut (so it is traced),
+// and apply a tiny decay each tick to keep values bounded.
+
+const BIRTH_JOY = 0.25;     // joy boost when a dead cell becomes alive
+const DEATH_SAD = 0.20;     // sadness boost when a live cell dies
+const IDEAL_NEIGHBOR_LOW = 2; // classic Life "ideal" band 2..3
+const IDEAL_NEIGHBOR_HIGH = 3;
+const ADEQ_UP = 0.10;       // adequacy alpha increase in ideal band
+const ADEQ_DOWN = 0.07;     // adequacy alpha decrease outside band
+const STRESS_DELTA = 0.10;  // stress bump on overcrowding/scarcity
+const CALM_DELTA = 0.08;    // calm bump in ideal band
+const DECAY = 0.04;         // generic decay per tick for emotion metrics
+
+const rules: Rule[] = [
+  // Survival / death with affect
+  {
+    kind: 'if',
+    condition: (ctx, env) => !!ctx.state.alive,
+    then: (ctx, env) => {
+      const n = env?.countNeighbors(n => !!n.state.alive) ?? 0;
+      if (n < 2 || n > 3) {
+        // death => sadness up, stress up, adequacy down
+        env?.mut?.set('state.alive', false); // traced assign
+        env?.mut?.set('memory.emotion.sadness', bump((ctx as any).memory?.emotion?.sadness, DEATH_SAD));
+        env?.mut?.set('memory.emotion.stress',   bump((ctx as any).memory?.emotion?.stress, STRESS_DELTA));
+        env?.mut?.set('memory.adequacy.alpha',   Math.max(0, ((ctx as any).memory?.adequacy?.alpha ?? 0) - ADEQ_DOWN));
+      } else {
+        // ideal band => calm up, adequacy up
+        env?.mut?.set('memory.emotion.calm',  bump((ctx as any).memory?.emotion?.calm, CALM_DELTA));
+        env?.mut?.set('memory.adequacy.alpha', Math.min(1, ((ctx as any).memory?.adequacy?.alpha ?? 0) + ADEQ_UP));
+      }
+    }
+  },
+  // Birth with affect
+  {
+    kind: 'unless',
+    condition: (ctx, env) => !!ctx.state.alive,
+    then: (ctx, env) => {
+      const n = env?.countNeighbors(n => !!n.state.alive) ?? 0;
+      if (n === 3) {
+        env?.mut?.set('state.alive', true); // traced assign
+        env?.mut?.set('memory.emotion.joy', bump((ctx as any).memory?.emotion?.joy, BIRTH_JOY));
+        // births in balanced surroundings are "confident"
+        env?.mut?.set('memory.adequacy.alpha', Math.min(1, ((ctx as any).memory?.adequacy?.alpha ?? 0) + ADEQ_UP));
+      }
+    }
+  },
+  // Per-tick decay of emotion (keeps values responsive)
+  {
+    kind: 'if',
+    condition: () => true,
+    then: (ctx, env) => {
+      const m = (ctx as any).memory ?? {};
+      const emo = (m.emotion ?? {});
+      env?.mut?.set('memory.emotion.joy',     decay(emo.joy, DECAY));
+      env?.mut?.set('memory.emotion.sadness', decay(emo.sadness, DECAY));
+      env?.mut?.set('memory.emotion.stress',  decay(emo.stress, DECAY));
+      env?.mut?.set('memory.emotion.calm',    decay(emo.calm, DECAY));
+    }
+  }
+];
+
+const interpreter = new Interpreter(rules);
+const W=10, H=10;
+const grid = new Grid2D(W, H, interpreter, new Moore());
+
+// Seed a vertical blinker with neutral affect
+const baseMem = { emotion: { joy: 0, sadness: 0, stress: 0, calm: 0 }, adequacy: { alpha: 0.5 } };
+
+grid.place({x:4, y:4}, new Monad({ alive: true },  JSON.parse(JSON.stringify(baseMem))));
+grid.place({x:4, y:5}, new Monad({ alive: true },  JSON.parse(JSON.stringify(baseMem))));
+grid.place({x:4, y:6}, new Monad({ alive: true },  JSON.parse(JSON.stringify(baseMem))));
+
+const tracer = new Tracer();
+
+function dumpAffect(label: string){
+  // Print affect of a small neighborhood around the blinker center
+  const coords = [ {x:4,y:4}, {x:4,y:5}, {x:4,y:6} ];
+  const lines: string[] = [];
+  lines.push(`Affect @ ${label}`);
+  for (const c of coords){
+    const m = (grid as any).cells[c.y][c.x];
+    if (!m) continue;
+    const { joy=0, sadness=0, stress=0, calm=0 } = m.memory?.emotion ?? {};
+    const alpha = m.memory?.adequacy?.alpha ?? 0;
+    lines.push(`  (${c.x},${c.y})  α=${alpha.toFixed(2)}  joy=${joy.toFixed(2)}  sad=${sadness.toFixed(2)}  stress=${stress.toFixed(2)}  calm=${calm.toFixed(2)}`);
+  }
+  console.log(lines.join('\n'));
+}
+
+function print(step: number){
+  console.log(`\nStep ${step}\n` + grid.toAscii('alive'));
+  dumpAffect(`step ${step}`);
+  const events = tracer.take();
+  if (events.length) console.log('Trace:', JSON.stringify(events, null, 2));
+}
+
+print(0);
+for (let i=1; i<=6; i++){
+  grid.tick(tracer);
+  print(i);
+}
+```

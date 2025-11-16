@@ -1,0 +1,532 @@
+# MPL Playground — Stage 3Y Patch (Artifact Bundles + Share Links + IndexedDB Storage)
+
+This patch upgrades artifacts with **bundling & share links** and moves storage to **IndexedDB** (with migration from localStorage). No server needed.
+
+**Highlights**
+
+* **IndexedDB-backed Artifacts** with auto-migration from 3X localStorage
+* **Bundles**: package selected artifacts (and optional notes) into a single **.zip** (store-only ZIP, no compression; zero deps)
+* **Share Links**: short `?share=ID` links using IndexedDB “shares” store; fallback **hash-embedded** payload for tiny bundles
+* **Bundles Panel**: pick artifacts → make zip, generate link, import from file or link
+* Non-breaking for previous data: 3Y migrates 3X artifacts on first use
+
+---
+
+## 1) `engine/storage/idb.ts` (new)
+
+```ts
+// engine/storage/idb.ts
+// Stage 3Y — tiny IndexedDB helper (promisified)
+
+export interface IdbStores { name: string; keyPath?: string }
+
+export async function openDB(dbName: string, version: number, stores: IdbStores[]) {
+  return await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = indexedDB.open(dbName, version);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const s of stores) if (!db.objectStoreNames.contains(s.name)) db.createObjectStore(s.name, { keyPath: s.keyPath || 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function tx<T=unknown>(db: IDBDatabase, store: string, mode: IDBTransactionMode, run: (os: IDBObjectStore) => IDBRequest<T>) {
+  return await new Promise<T>((resolve, reject) => {
+    const t = db.transaction(store, mode); const os = t.objectStore(store); const r = run(os);
+    r.onsuccess = () => resolve(r.result as any);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+export async function getAll<T=any>(db: IDBDatabase, store: string): Promise<T[]> {
+  return await tx<T[]>(db, store, 'readonly', os => os.getAll());
+}
+export async function get<T=any>(db: IDBDatabase, store: string, key: IDBValidKey): Promise<T | undefined> {
+  return await tx<T>(db, store, 'readonly', os => os.get(key)) as any;
+}
+export async function put(db: IDBDatabase, store: string, value: any): Promise<IDBValidKey> {
+  return await tx(db, store, 'readwrite', os => os.put(value));
+}
+export async function del(db: IDBDatabase, store: string, key: IDBValidKey): Promise<void> {
+  await tx(db, store, 'readwrite', os => os.delete(key) as any);
+}
+export async function clear(db: IDBDatabase, store: string): Promise<void> { await tx(db, store, 'readwrite', os => os.clear() as any); }
+```
+
+---
+
+## 2) `engine/debugger/artifacts.store.ts` (new) — pluggable store + migration
+
+```ts
+// engine/debugger/artifacts.store.ts
+// Stage 3Y — Artifacts store backed by IndexedDB (with migration from localStorage)
+
+import { openDB, getAll, get, put, del, clear } from '../storage/idb';
+import type { ArtifactMeta, ArtifactRecord, ArtifactKind } from './artifacts.types';
+
+const DB_NAME = 'mpl_playground_v1';
+const META = 'artifacts_meta';
+const DATA = 'artifacts_data';
+const SHARES = 'shares';
+
+let dbPromise: Promise<IDBDatabase> | null = null;
+function db(){ return dbPromise ||= openDB(DB_NAME, 1, [ { name: META }, { name: DATA }, { name: SHARES } ]); }
+
+export async function listArtifacts(): Promise<ArtifactMeta[]> { return (await getAll<ArtifactMeta>(await db(), META)).sort((a,b)=>b.createdAt-a.createdAt); }
+export async function loadArtifact(id: string): Promise<ArtifactRecord | null> {
+  const d = await get<any>(await db(), DATA, id); if (!d) return null; const m = await get<ArtifactMeta>(await db(), META, id); if (!m) return null; return { meta: m, data: d.data };
+}
+export async function saveArtifact(meta: ArtifactMeta, data: string): Promise<void> {
+  const DB = await db(); await put(DB, META, meta); await put(DB, DATA, { id: meta.id, data });
+}
+export async function removeArtifact(id: string): Promise<void> { const DB = await db(); await del(DB, META, id); await del(DB, DATA, id); }
+export async function clearArtifacts(): Promise<void> { const DB = await db(); await clear(DB, META); await clear(DB, DATA); }
+
+// Shares (for share links)
+export interface SharePayload { id: string; createdAt: number; kind: 'bundle'|'inline'; payload: any }
+export async function saveShare(sp: SharePayload): Promise<void> { await put(await db(), SHARES, sp); }
+export async function getShare(id: string): Promise<SharePayload | undefined> { return await get(await db(), SHARES, id); }
+
+// Migration from 3X localStorage to IndexedDB (one-shot, idempotent)
+const LSI = 'mpl_artifacts_index_v1';
+const LSP = (id: string) => `mpl_artifacts_${id}`;
+let migrated = false;
+export async function migrateFromLocalStorage() {
+  if (migrated) return; migrated = true;
+  try {
+    const idxRaw = localStorage.getItem(LSI); if (!idxRaw) return;
+    const metas = JSON.parse(idxRaw) as ArtifactMeta[];
+    for (const m of metas) {
+      const exists = await get<ArtifactMeta>(await db(), META, m.id);
+      if (exists) continue; // already migrated
+      const data = localStorage.getItem(LSP(m.id)); if (data==null) continue;
+      await saveArtifact(m, data);
+    }
+    // Optional cleanup — comment out if you want to keep old copy
+    // localStorage.removeItem(LSI); for (const m of metas) localStorage.removeItem(LSP(m.id));
+  } catch {}
+}
+```
+
+---
+
+## 3) `engine/debugger/artifacts.types.ts` (new)
+
+```ts
+// engine/debugger/artifacts.types.ts
+export type ArtifactKind = 'image/png'|'application/json'|'text/plain'|'text/csv';
+export interface ArtifactMeta {
+  id: string; kind: ArtifactKind; name: string; size: number; createdAt: number; tags: string[]; sessionId?: string; scenarioId?: string; stepIndex?: number; index?: number;
+}
+export interface ArtifactRecord { meta: ArtifactMeta; data: string }
+```
+
+---
+
+## 4) `engine/debugger/artifacts.ts` (updated) — async API using IDB store
+
+```ts
+// engine/debugger/artifacts.ts
+// Stage 3Y — switch to async API + IDB store under the hood
+
+import type { ArtifactKind, ArtifactMeta, ArtifactRecord } from './artifacts.types';
+import { listArtifacts, loadArtifact, saveArtifact, removeArtifact, clearArtifacts, migrateFromLocalStorage } from './artifacts.store';
+
+function now(){ return Date.now(); }
+function genId(){ return `af_${now()}_${Math.random().toString(36).slice(2,8)}`; }
+function approxDataUrlBytes(dataUrl: string){ const i = dataUrl.indexOf(','); if (i<0) return dataUrl.length; const b64 = dataUrl.slice(i+1); return Math.floor(b64.length*3/4); }
+function sanitize(s: string){ return s.replace(/[\r\n]+/g,' ').slice(0,180); }
+
+export const Artifacts = {
+  async init(){ await migrateFromLocalStorage(); },
+  async list(): Promise<ArtifactMeta[]> { return await listArtifacts(); },
+  async load(id: string): Promise<ArtifactRecord | null> { return await loadArtifact(id); },
+  async save(kind: ArtifactKind, name: string, data: string, tags: string[] = [], refs?: Partial<Pick<ArtifactMeta,'sessionId'|'scenarioId'|'stepIndex'|'index'>>): Promise<ArtifactMeta> {
+    const id = genId();
+    const size = kind==='image/png' ? approxDataUrlBytes(data) : new Blob([data]).size;
+    const meta: ArtifactMeta = { id, kind, name: sanitize(name), size, createdAt: now(), tags, ...refs };
+    await saveArtifact(meta, data);
+    return meta;
+  },
+  async remove(id: string): Promise<boolean> { await removeArtifact(id); return true; },
+  async clearAll(): Promise<void> { await clearArtifacts(); },
+  async rename(id: string, name: string){ const rec = await loadArtifact(id); if (!rec) return; rec.meta.name = sanitize(name); await saveArtifact(rec.meta, rec.data); },
+  async retag(id: string, tags: string[]){ const rec = await loadArtifact(id); if (!rec) return; rec.meta.tags = tags; await saveArtifact(rec.meta, rec.data); },
+  async download(id: string){ const rec = await this.load(id); if (!rec) return; const blob = rec.meta.kind==='image/png' ? dataUrlToBlob(rec.data) : new Blob([rec.data], { type: rec.meta.kind }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = safeFilename(rec.meta.name, rec.meta.kind); document.body.appendChild(a); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 0); a.remove(); },
+};
+
+function dataUrlToBlob(dataUrl: string){ const [head, b64] = dataUrl.split(','); const mime = /data:(.*?);/.exec(head)?.[1] || 'application/octet-stream'; const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i); return new Blob([u8], { type: mime }); }
+function safeFilename(name: string, kind: ArtifactKind){ const base = name.replace(/\W+|_+/g,'_').replace(/^_+|_+$/g,'') || 'artifact'; const ext = kind==='image/png' ? 'png' : kind==='application/json' ? 'json' : kind==='text/csv' ? 'csv' : 'txt'; return `${base}.${ext}`; }
+```
+
+> ⚠️ **API change:** `Artifacts.*` methods are now **async**. Panels from 3X are updated below.
+
+---
+
+## 5) `engine/debugger/zip.ts` (new) — zero-dep ZIP (store-only)
+
+```ts
+// engine/debugger/zip.ts
+// Stage 3Y — Minimal ZIP writer (no compression); returns Blob
+
+export interface ZipFile { name: string; data: Uint8Array; modDate?: Date }
+
+export function zipStore(files: ZipFile[]): Blob {
+  const cd: Uint8Array[] = []; let offset = 0; const chunks: Uint8Array[] = [];
+  for (const f of files) {
+    const nameBytes = new TextEncoder().encode(f.name);
+    const dt = f.modDate || new Date(); const { dosTime, dosDate } = toDosTime(dt);
+    const crc = crc32(f.data);
+    const lf = new Uint8Array(30 + nameBytes.length + f.data.length);
+    write32(lf, 0, 0x04034b50); // local file header sig
+    write16(lf, 4, 20); // version needed
+    write16(lf, 6, 0); // gp flag
+    write16(lf, 8, 0); // method 0 (store)
+    write16(lf,10, dosTime); write16(lf,12, dosDate);
+    write32(lf,14, crc >>> 0); write32(lf,18, f.data.length); write32(lf,22, f.data.length);
+    write16(lf,26, nameBytes.length); write16(lf,28, 0); // extra len
+    lf.set(nameBytes, 30); lf.set(f.data, 30 + nameBytes.length);
+    chunks.push(lf);
+
+    const c = new Uint8Array(46 + nameBytes.length);
+    write32(c, 0, 0x02014b50); // central dir sig
+    write16(c, 4, 20); write16(c, 6, 20);
+    write16(c, 8, 0); write16(c,10, 0); // method
+    write16(c,12, dosTime); write16(c,14, dosDate);
+    write32(c,16, crc >>> 0); write32(c,20, f.data.length); write32(c,24, f.data.length);
+    write16(c,28, nameBytes.length); write16(c,30, 0); write16(c,32, 0); // extra, comment
+    write16(c,34, 0); write16(c,36, 0); // disk start, attrs
+    write32(c,38, 0); write32(c,42, offset);
+    c.set(nameBytes, 46);
+    cd.push(c);
+    offset += lf.length;
+  }
+  const cdBlob = concat(cd);
+  const end = new Uint8Array(22);
+  write32(end, 0, 0x06054b50); write16(end, 4, 0); write16(end, 6, 0);
+  write16(end, 8, files.length); write16(end,10, files.length);
+  write32(end,12, cdBlob.length); write32(end,16, offset); write16(end,20, 0);
+  return new Blob([...chunks, cdBlob, end], { type: 'application/zip' });
+}
+
+function write16(a: Uint8Array, p: number, v: number){ a[p]=v&255; a[p+1]=(v>>>8)&255; }
+function write32(a: Uint8Array, p: number, v: number){ a[p]=v&255; a[p+1]=(v>>>8)&255; a[p+2]=(v>>>16)&255; a[p+3]=(v>>>24)&255; }
+function toDosTime(d: Date){ const t = { y: d.getFullYear(), m: d.getMonth()+1, d: d.getDate(), hh: d.getHours(), mm: d.getMinutes(), ss: d.getSeconds() };
+  return { dosTime: (t.hh<<11)|(t.mm<<5)|(t.ss/2|0), dosDate: ((t.y-1980)<<9)|(t.m<<5)|t.d };
+}
+function concat(parts: Uint8Array[]): Uint8Array { const n = parts.reduce((s,p)=>s+p.length,0); const out = new Uint8Array(n); let o=0; for (const p of parts){ out.set(p,o); o+=p.length; } return out; }
+
+// CRC-32
+const T = new Uint32Array(256).map((_,i)=>{ let c=i; for(let k=0;k<8;k++) c = c&1?0xEDB88320^(c>>>1):(c>>>1); return c>>>0; });
+function crc32(d: Uint8Array){ let c = ~0; for (let i=0;i<d.length;i++) c = T[(c^d[i])&255] ^ (c>>>8); return ~c; }
+```
+
+---
+
+## 6) `engine/debugger/bundles.ts` (new) — build/download/import bundles + share links
+
+```ts
+// engine/debugger/bundles.ts
+// Stage 3Y — Bundle artifacts into ZIP, or generate share links using IDB shares
+
+import { Artifacts } from './artifacts';
+import type { ArtifactMeta } from './artifacts.types';
+import { zipStore } from './zip';
+import { saveShare, getShare, SharePayload } from './artifacts.store';
+
+export interface BundleManifest { schema: 'mpl.bundle.v1'; createdAt: number; items: { meta: ArtifactMeta; data: string }[]; notes?: string }
+
+export async function buildBundle(ids: string[], notes?: string): Promise<BundleManifest> {
+  const items = [] as BundleManifest['items'];
+  for (const id of ids) { const rec = await Artifacts.load(id); if (rec) items.push(rec); }
+  return { schema: 'mpl.bundle.v1', createdAt: Date.now(), items, notes };
+}
+
+export async function downloadZip(man: BundleManifest, filename = 'mpl-bundle.zip') {
+  const files = await Promise.all(man.items.map(async (it, i) => {
+    const base = safeName(it.meta.name, it.meta.kind);
+    const data = it.meta.kind === 'image/png' ? dataUrlToU8(it.data) : new TextEncoder().encode(it.data);
+    return { name: `artifacts/${i+1}_${base}`, data };
+  }));
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(man, null, 2));
+  const blob = zipStore([ ...files, { name: 'manifest.json', data: manifestBytes } ]);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 0); a.remove();
+}
+
+export async function importBundle(json: BundleManifest){
+  if (json.schema !== 'mpl.bundle.v1') throw new Error('Unknown bundle schema');
+  for (const rec of json.items) await Artifacts.save(rec.meta.kind, rec.meta.name, rec.data, rec.meta.tags || [], { index: rec.meta.index, sessionId: rec.meta.sessionId, scenarioId: rec.meta.scenarioId, stepIndex: rec.meta.stepIndex });
+}
+
+// Share links
+export async function createShare(man: BundleManifest): Promise<string> {
+  const small = JSON.stringify(man).length < 180_000; // heuristic (~180KB fits many URLs)
+  if (small) {
+    const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(man)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    return withBase(`#share:${b64}`);
+  }
+  const id = `sh_${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+  const sp: SharePayload = { id, createdAt: Date.now(), kind: 'bundle', payload: man };
+  await saveShare(sp);
+  return withBase(`?share=${id}`);
+}
+
+export async function resolveShareFromLocation(): Promise<BundleManifest | null> {
+  const url = new URL(window.location.href);
+  const qid = url.searchParams.get('share');
+  if (qid) { const sp = await getShare(qid); return (sp?.payload as any) || null; }
+  if (url.hash.startsWith('#share:')) { try { const b64 = url.hash.slice('#share:'.length).replace(/-/g,'+').replace(/_/g,'/'); const json = decodeURIComponent(escape(atob(b64))); return JSON.parse(json); } catch { return null; } }
+  return null;
+}
+
+function withBase(suffix: string){ const { origin, pathname } = window.location; return `${origin}${pathname}${suffix}`; }
+function dataUrlToU8(dataUrl: string){ const [_, b64] = dataUrl.split(','); const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) u8[i]=bin.charCodeAt(i); return u8; }
+function safeName(name: string, kind: string){ const base = name.replace(/\W+|_+/g,'_').replace(/^_+|_+$/g,'') || 'artifact'; const ext = kind==='image/png'?'png':kind==='application/json'?'json':kind==='text/csv'?'csv':'txt'; return `${base}.${ext}`; }
+```
+
+---
+
+## 7) `playground/components/BundlesPanel.tsx` (new) — UI for bundles & share links
+
+```tsx
+// playground/components/BundlesPanel.tsx
+// Stage 3Y — Select artifacts → bundle to zip or share link; import bundles
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { Artifacts } from '../../engine/debugger/artifacts';
+import type { ArtifactMeta } from '../../engine/debugger/artifacts.types';
+import { buildBundle, downloadZip, importBundle, createShare } from '../../engine/debugger/bundles';
+
+export const BundlesPanel: React.FC = () => {
+  const [items, setItems] = useState<ArtifactMeta[]>([]);
+  const [sel, setSel] = useState<Record<string, boolean>>({});
+  const [notes, setNotes] = useState('');
+  const [shareLink, setShareLink] = useState<string>('');
+
+  useEffect(() => { (async () => { await Artifacts.init(); setItems(await Artifacts.list()); })(); }, []);
+  const refresh = async () => setItems(await Artifacts.list());
+
+  const picked = useMemo(() => items.filter(m => sel[m.id]), [items, sel]);
+  const pickAll = (on: boolean) => setSel(Object.fromEntries(items.map(m => [m.id, on])));
+
+  const bundle = async (mode: 'zip'|'share') => {
+    const man = await buildBundle(picked.map(p => p.id), notes.trim() || undefined);
+    if (mode==='zip') await downloadZip(man, 'mpl-bundle.zip'); else setShareLink(await createShare(man));
+  };
+
+  return (
+    <div className="mpl-bundles">
+      <div className="mpl-bun-bar">
+        <button className="mpl-btn" onClick={() => pickAll(true)}>Select all</button>
+        <button className="mpl-btn" onClick={() => pickAll(false)}>Clear</button>
+        <button className="mpl-btn" onClick={() => bundle('zip')} disabled={!picked.length}>⬇ Export .zip</button>
+        <button className="mpl-btn" onClick={() => bundle('share')} disabled={!picked.length}>🔗 Create share link</button>
+        <button className="mpl-btn" onClick={refresh}>↻ Refresh</button>
+        <input type="file" accept="application/json,.json" onChange={async e => {
+          const f = e.target.files?.[0]; if (!f) return; const text = await f.text(); try { const man = JSON.parse(text); await importBundle(man); await refresh(); alert('Imported bundle'); } catch (err) { alert('Import failed: '+(err as any)?.message); }
+        }} />
+      </div>
+
+      <textarea className="mpl-code" placeholder="Optional notes (bundled in manifest)" value={notes} onChange={e=>setNotes(e.target.value)} />
+
+      {shareLink && (
+        <div className="mpl-share">
+          <input value={shareLink} readOnly onFocus={e=>e.currentTarget.select()} />
+          <button className="mpl-btn" onClick={()=>navigator.clipboard.writeText(shareLink)}>Copy link</button>
+        </div>
+      )}
+
+      <table className="mpl-table">
+        <thead><tr><th></th><th>Name</th><th>Kind</th><th>Size</th><th>Tags</th><th>Created</th></tr></thead>
+        <tbody>
+          {items.map(m => (
+            <tr key={m.id}>
+              <td><input type="checkbox" checked={!!sel[m.id]} onChange={e=>setSel(s=>({ ...s, [m.id]: e.target.checked }))} /></td>
+              <td>{m.name}</td>
+              <td>{m.kind}</td>
+              <td>{(m.size/1024).toFixed(1)} KB</td>
+              <td>{m.tags.join(', ')}</td>
+              <td>{new Date(m.createdAt).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {items.length===0 && <div className="mpl-empty">No artifacts yet</div>}
+    </div>
+  );
+};
+```
+
+---
+
+## 8) `playground/components/ArtifactsPanel.tsx` (update) — switch to async
+
+```tsx
+// playground/components/ArtifactsPanel.tsx (3X → 3Y)
+// Changes: await Artifacts.init(); list/load/remove/rename/retag/download are async
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { Artifacts } from '../../engine/debugger/artifacts';
+import type { ArtifactMeta } from '../../engine/debugger/artifacts.types';
+
+export const ArtifactsPanel: React.FC = () => {
+  const [items, setItems] = useState<ArtifactMeta[]>([]);
+  const [q, setQ] = useState('');
+  const [kind, setKind] = useState<'all'|ArtifactMeta['kind']>('all');
+
+  useEffect(() => { (async () => { await Artifacts.init(); setItems(await Artifacts.list()); })(); }, []);
+  const refresh = async () => setItems(await Artifacts.list());
+
+  const view = useMemo(() => items.filter(m => {
+    const okKind = kind==='all' || m.kind===kind; const qq = q.trim().toLowerCase();
+    const okText = !qq || m.name.toLowerCase().includes(qq) || m.tags.some(t => t.toLowerCase().includes(qq));
+    return okKind && okText;
+  }), [items, q, kind]);
+
+  const loadText = async (id: string) => (await Artifacts.load(id))?.data || '';
+
+  return (
+    <div className="mpl-artifacts">
+      <div className="mpl-art-bar">
+        <input placeholder="Search name or tag" value={q} onChange={e=>setQ(e.target.value)} />
+        <select value={kind} onChange={e=>setKind(e.target.value as any)}>
+          <option value="all">all</option>
+          <option value="image/png">image/png</option>
+          <option value="application/json">application/json</option>
+          <option value="text/plain">text/plain</option>
+          <option value="text/csv">text/csv</option>
+        </select>
+        <button className="mpl-btn" onClick={refresh}>↻ Refresh</button>
+        <button className="mpl-btn mpl-danger" onClick={async()=>{ if (confirm('Delete ALL artifacts?')) { await Artifacts.clearAll(); await refresh(); } }}>Clear all</button>
+      </div>
+
+      <div className="mpl-art-list">
+        {view.map(m => (
+          <div key={m.id} className="mpl-art-item">
+            <div className="mpl-art-meta">
+              <div className="mpl-art-title">{m.name}</div>
+              <div className="mpl-art-sub">{new Date(m.createdAt).toLocaleString()} • {m.kind} • {(m.size/1024).toFixed(1)} KB</div>
+              <div className="mpl-art-tags">{m.tags.map(t => <span key={t} className="mpl-chip">{t}</span>)}</div>
+            </div>
+            <div className="mpl-art-actions">
+              <button className="mpl-btn" onClick={async()=>Artifacts.download(m.id)}>⬇ Download</button>
+              <button className="mpl-btn" onClick={async()=>{ const n = prompt('Rename', m.name); if (n!=null) { await Artifacts.rename(m.id, n); await refresh(); } }}>Rename</button>
+              <button className="mpl-btn mpl-danger" onClick={async()=>{ await Artifacts.remove(m.id); await refresh(); }}>Delete</button>
+            </div>
+            <div className="mpl-art-preview">
+              {m.kind==='image/png' ? (
+                <img src={(await Artifacts.load(m.id))?.data} alt={m.name} />
+              ) : (
+                <pre>{truncate(await loadText(m.id), 2000)}</pre>
+              )}
+            </div>
+          </div>
+        ))}
+        {view.length===0 && <div className="mpl-empty">No artifacts match</div>}
+      </div>
+    </div>
+  );
+};
+
+function truncate(s: string, n: number){ return s.length>n ? s.slice(0, n) + '\n…' : s; }
+```
+
+---
+
+## 9) `playground/components/DebuggerPanel.tsx` (augment) — Bundles + share resolver + async saves
+
+```tsx
+// playground/components/DebuggerPanel.tsx (diffs for 3Y)
+// - Use async Artifacts API in Quick Capture helpers
+// - Add BundlesPanel section
+// - Resolve ?share= / #share: on mount and prompt import
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+// ...existing imports...
+import { Artifacts } from "../../engine/debugger/artifacts";
+import { BundlesPanel } from "./BundlesPanel";
+import { resolveShareFromLocation, importBundle } from "../../engine/debugger/bundles";
+
+// inside component body
+useEffect(() => { Artifacts.init(); }, []);
+
+async function quickScreenshot() {
+  const root = rootRef.current; if (!root) return;
+  const el = root.querySelector(selector) as HTMLElement; if (!el) { console.warn('selector not found', selector); return; }
+  const dataUrl = await nodeToPng(el, { scale: 2, bg: '#fff' });
+  await Artifacts.save('image/png', `${shotName} @ ${idx}`, dataUrl, ['screenshot'], {});
+}
+function dumpSnapshot(){ const json = JSON.stringify(current || null, null, 2); Artifacts.save('application/json', `Snapshot @ ${idx}`, json, ['snapshot'], { index: idx }); }
+function dumpTraceNDJSON(){ const lines = (timeline||[]).map(o => JSON.stringify(o)).join('\n'); Artifacts.save('text/plain', 'trace.ndjson', lines, ['trace']); }
+function dumpMetrics(){ const specs: MetricSpec[] = [ { id: 'ticks', kind: 'ticks' }, { id: 'monads', kind: 'monadCount' }, { id: 'edges', kind: 'edgeCount' }, { id: 'R1', kind: 'ruleCount', ruleId: 'R1' }, { id: 'rules', kind: 'ruleHistogram' } ]; const m = computeMetrics(timeline, specs); const csv = toCSV(m); Artifacts.save('text/csv', 'metrics.csv', csv, ['metrics']); Artifacts.save('application/json', 'metrics.json', JSON.stringify(m, null, 2), ['metrics']); }
+
+// Resolve share link on load
+useEffect(() => { (async () => { const bun = await resolveShareFromLocation(); if (bun) { const ok = confirm('Import shared MPL bundle?'); if (ok) await importBundle(bun); }})(); }, []);
+
+// in JSX, add after Artifacts section or before
+<section className="mpl-section">
+  <header className="mpl-section-h">Bundles & Share Links</header>
+  <BundlesPanel />
+</section>
+```
+
+---
+
+## 10) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 3Y — Bundles UI */
+.mpl-bundles { display: grid; gap: 10px; }
+.mpl-bun-bar { display: grid; grid-template-columns: auto auto auto auto auto 1fr auto; gap: 8px; align-items: center; }
+.mpl-share { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.mpl-code { width: 100%; min-height: 100px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+```
+
+---
+
+## 11) Example — `playground/pages/DebugExample3Y.tsx`
+
+```tsx
+// playground/pages/DebugExample3Y.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3Y() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B", "C"] }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["A", "B"] } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B" } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"] }, { id: "C", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" } ] },
+  ], []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3Y — Artifact Bundles + Share Links + IndexedDB Storage</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 12) Migration notes & limits
+
+* First load of 3Y runs **localStorage → IndexedDB** migration (idempotent). If you prefer to keep a backup, comment out the cleanup lines in `migrateFromLocalStorage()`.
+* **URL size limits**: hash-embedded bundles work up to \~180KB of JSON (varies by browser). Larger bundles automatically use `?share=ID` in IndexedDB.
+* **ZIP**: store-only ZIP (no compression). Size-efficient enough for text; PNGs will be stored verbatim.
+* **Security**: Share links are local-only (IDB). Anyone opening your link on the **same machine & origin** can import; to share across machines, download the **.zip** and send the file.
+
+---
+
+## 13) Changelog — Stage 3Y
+
+* New: `storage/idb.ts`, `artifacts.store.ts`, `artifacts.types.ts`, `zip.ts`, `bundles.ts`
+* Updated: `artifacts.ts` (async + IDB + migration)
+* Updated UI: `ArtifactsPanel` (async), new `BundlesPanel`
+* `DebuggerPanel`: share resolver, quick-capture async saves, Bundles section
+* CSS: bundles layout
+
+```
+```

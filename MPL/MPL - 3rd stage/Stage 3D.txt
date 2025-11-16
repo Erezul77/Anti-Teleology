@@ -1,0 +1,500 @@
+# MPL – Stage 3D (Remote Tile Streaming • WebRTC + WebSocket Signaling)
+
+Stage **3D** enables **remote visualization** of massive simulations by streaming **changed tiles** over a low‑latency **WebRTC DataChannel**, with a tiny **WebSocket signaling** service to coordinate peers. It plugs directly into the 3C tiled renderer so viewers only draw visible tiles.
+
+* **Host** runs the simulation (GPU 3A or CPU/Workers 3B), detects changed tiles each tick, and streams them.
+* **Viewer** subscribes, maintains a full grid buffer, and lets 3C’s **TiledRenderer** redraw only visible tiles under a per‑frame budget.
+* **Signaling** via a minimal Node WS server; **STUN** defaults to Google.
+* **Fallback**: if WebRTC fails, it can fall back to WebSocket tile streaming (same message format).
+
+---
+
+## Directory Tree (updated)
+
+```
+MPL-Stage-3/
+├─ package.json
+├─ tsconfig.json
+├─ vite.config.ts
+├─ README.md
+├─ server/
+│  └─ signal-3d.ts                  # NEW: WebSocket signaling server (rooms)
+├─ src/
+│  ├─ gpu/
+│  │  ├─ life.wgsl.ts
+│  │  └─ stepper.ts                 # from 3A (readTile used by host)
+│  ├─ render/
+│  │  ├─ tiles.ts
+│  │  └─ tiled-renderer.ts          # from 3C
+│  ├─ net/
+│  │  ├─ protocol.ts                # NEW: tile packet encode/decode
+│  │  ├─ rtc.ts                     # NEW: WebRTC helper + WS signaling client
+│  │  └─ ws-fallback.ts             # NEW: fallback tile transport over WS
+│  ├─ stream/
+│  │  ├─ tiles-host.ts              # NEW: host side (diff + send)
+│  │  └─ tiles-view.ts              # NEW: viewer side (apply + buffer)
+│  └─ web/
+│     ├─ stream-host.ts             # NEW: Host UI (simulate + broadcast)
+│     └─ stream-view.ts             # NEW: Viewer UI (connect + view)
+├─ index-3d-host.html               # NEW: Stage 3D host launcher
+└─ index-3d-view.html               # NEW: Stage 3D viewer launcher
+```
+
+Add to **package.json**:
+
+```json
+{
+  "scripts": {
+    "signal:3d": "tsx server/signal-3d.ts",
+    "dev:3d": "vite --open index-3d-host.html"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
+```
+
+---
+
+## server/signal-3d.ts (NEW — minimal WS signaling)
+
+```ts
+import { WebSocketServer } from 'ws';
+
+const wss = new WebSocketServer({ port: 8787 });
+const rooms = new Map<string, Set<WebSocket>>();
+
+function joinRoom(ws: WebSocket, room: string){
+  if (!rooms.has(room)) rooms.set(room, new Set());
+  rooms.get(room)!.add(ws);
+  (ws as any)._room = room;
+}
+function leave(ws: WebSocket){ const r=(ws as any)._room; if (r && rooms.has(r)){ rooms.get(r)!.delete(ws); if (rooms.get(r)!.size===0) rooms.delete(r); } }
+
+wss.on('connection', (ws) => {
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(String(data));
+      if (msg.type === 'join') { joinRoom(ws, msg.room); ws.send(JSON.stringify({ type:'joined', room: msg.room })); return; }
+      const room = (ws as any)._room; if (!room) return;
+      // Broadcast SDP/ICE or control to others in room
+      for (const peer of rooms.get(room) || []) if (peer !== ws) peer.send(JSON.stringify(msg));
+    } catch {}
+  });
+  ws.on('close', () => leave(ws));
+});
+
+console.log('Signaling WS listening on ws://localhost:8787');
+```
+
+---
+
+## src/net/protocol.ts (NEW — compact tile packets)
+
+```ts
+// Binary packet format (ArrayBuffer on RTC/WS):
+// byte 0: type (1=Tile, 2=Reset, 3=Meta)
+// type 1 Tile header (1 + 4*5 = 21 bytes rounded to 24):
+// [t=1][ver u32][x0 u32][y0 u32][w u32][h u32] then payload of w*h bytes (0/1)
+// type 2 Reset: [t=2][ver u32] (viewer resets all tiles to 0 and sets version)
+// type 3 Meta:  [t=3][gridW u32][gridH u32]
+
+export type Tile = { ver:number; x0:number; y0:number; w:number; h:number; data:Uint8Array };
+
+export function packMeta(gridW:number, gridH:number){
+  const buf = new ArrayBuffer(1+8); const dv=new DataView(buf);
+  dv.setUint8(0,3); dv.setUint32(1,gridW,true); dv.setUint32(5,gridH,true);
+  return buf;
+}
+
+export function packReset(ver:number){ const buf=new ArrayBuffer(1+4); const dv=new DataView(buf); dv.setUint8(0,2); dv.setUint32(1,ver,true); return buf; }
+
+export function packTile(t: Tile){
+  const header = new ArrayBuffer(1+20); const dv=new DataView(header);
+  dv.setUint8(0,1); dv.setUint32(1,t.ver,true); dv.setUint32(5,t.x0,true); dv.setUint32(9,t.y0,true); dv.setUint32(13,t.w,true); dv.setUint32(17,t.h,true);
+  const out = new Uint8Array(header.byteLength + t.data.byteLength);
+  out.set(new Uint8Array(header),0); out.set(t.data, header.byteLength);
+  return out.buffer;
+}
+
+export function unpack(buf:ArrayBuffer){
+  const dv = new DataView(buf); const t=dv.getUint8(0);
+  if (t===3){ return { type:3, gridW: dv.getUint32(1,true), gridH: dv.getUint32(5,true) } as const; }
+  if (t===2){ return { type:2, ver: dv.getUint32(1,true) } as const; }
+  if (t===1){ const ver=dv.getUint32(1,true), x0=dv.getUint32(5,true), y0=dv.getUint32(9,true), w=dv.getUint32(13,true), h=dv.getUint32(17,true); const data=new Uint8Array(buf, 1+20); return { type:1, ver, x0, y0, w, h, data } as const; }
+  return { type:0 } as const;
+}
+```
+
+---
+
+## src/net/rtc.ts (NEW — WebRTC + WS signaling helper)
+
+```ts
+export type Peer = { dc: RTCDataChannel; close():void };
+
+export async function connectRTC(role:'host'|'viewer', room:string, signalUrl='ws://localhost:8787'): Promise<Peer> {
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  const ws = new WebSocket(signalUrl);
+  await new Promise<void>(res => { ws.onopen = ()=>{ ws.send(JSON.stringify({ type:'join', room })); res(); }; });
+
+  function send(msg:any){ ws.send(JSON.stringify(msg)); }
+
+  if (role==='host'){
+    const dc = pc.createDataChannel('tiles', { ordered: true });
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer); send({ type:'sdp-offer', sdp: offer.sdp });
+    ws.onmessage = async (e)=>{ const m=JSON.parse(e.data); if(m.type==='sdp-answer'){ await pc.setRemoteDescription({ type:'answer', sdp:m.sdp }); } if(m.type==='ice'){ pc.addIceCandidate(m.cand); } };
+    pc.onicecandidate = (ev)=>{ if(ev.candidate) send({ type:'ice', cand: ev.candidate }); };
+    await new Promise<void>(res => { dc.onopen = ()=> res(); });
+    return { dc, close(){ dc.close(); pc.close(); ws.close(); } };
+  } else {
+    const dcReady = new Promise<RTCDataChannel>(res=> pc.ondatachannel = (ev)=>{ if (ev.channel.label==='tiles'){ ev.channel.binaryType='arraybuffer'; res(ev.channel); } });
+    ws.onmessage = async (e)=>{ const m=JSON.parse(e.data); if(m.type==='sdp-offer'){ await pc.setRemoteDescription({ type:'offer', sdp:m.sdp }); const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); send({ type:'sdp-answer', sdp: ans.sdp }); } if(m.type==='ice'){ pc.addIceCandidate(m.cand); } };
+    pc.onicecandidate = (ev)=>{ if(ev.candidate) send({ type:'ice', cand: ev.candidate }); };
+    const dc = await dcReady;
+    return { dc, close(){ dc.close(); pc.close(); ws.close(); } };
+  }
+}
+```
+
+---
+
+## src/net/ws-fallback.ts (NEW — WebSocket tile transport)
+
+```ts
+import { unpack } from './protocol.js';
+export type WSPeer = { ws: WebSocket; send(buf: ArrayBuffer): void; close():void };
+export function connectWS(role:'host'|'viewer', room:string, url='ws://localhost:8787/tiles'): WSPeer {
+  const ws = new WebSocket(url + '?room=' + encodeURIComponent(room));
+  (ws as any).binaryType = 'arraybuffer';
+  return { ws, send(buf){ ws.send(buf); }, close(){ ws.close(); } };
+}
+```
+
+---
+
+## src/stream/tiles-host.ts (NEW — host: detect diffs + stream)
+
+```ts
+import { packMeta, packReset, packTile } from '../net/protocol.js';
+
+export type TileProducer = {
+  gridW:number; gridH:number; tileW:number; tileH:number;
+  version(): number;
+  readTile(x0:number, y0:number, w:number, h:number): Promise<Uint8Array> | Uint8Array;
+};
+
+export class TileStreamerHost {
+  private lastVer = -1; private sentVer = -1; private dirty = new Set<string>();
+  constructor(private prod: TileProducer, private sendBinary: (buf:ArrayBuffer)=>void) {}
+
+  async tick(){
+    const v = this.prod.version();
+    if (v !== this.lastVer){
+      this.lastVer = v;
+      // Mark all tiles dirty at new version (simple strategy)
+      for (let ty=0; ty<Math.ceil(this.prod.gridH/this.prod.tileH); ty++){
+        for (let tx=0; tx<Math.ceil(this.prod.gridW/this.prod.tileW); tx++){
+          this.dirty.add(`${tx}:${ty}`);
+        }
+      }
+    }
+
+    if (this.sentVer !== v){
+      // send meta and reset when version changes first time
+      this.sendBinary(packMeta(this.prod.gridW, this.prod.gridH));
+      this.sendBinary(packReset(v));
+      this.sentVer = v;
+    }
+
+    // Send a fixed number of tiles per tick (backpressure friendly)
+    let budget = 64; // tiles per tick
+    for (const key of Array.from(this.dirty)){
+      if (budget--<=0) break;
+      const [txS,tyS] = key.split(':'); const tx=Number(txS), ty=Number(tyS);
+      const x0 = tx*this.prod.tileW, y0 = ty*this.prod.tileH;
+      const w = Math.min(this.prod.tileW, this.prod.gridW - x0); const h = Math.min(this.prod.tileH, this.prod.gridH - y0);
+      const data = await this.prod.readTile(x0,y0,w,h);
+      this.sendBinary(packTile({ ver:this.lastVer, x0, y0, w, h, data }));
+      this.dirty.delete(key);
+    }
+  }
+}
+```
+
+---
+
+## src/stream/tiles-view\.ts (NEW — viewer: apply updates to buffer)
+
+```ts
+import { unpack } from '../net/protocol.js';
+
+export class RemoteGridBuffer {
+  gridW=0; gridH=0; buf = new Uint8Array(0); private _ver=-1;
+  version(){ return this._ver; }
+  apply(buf:ArrayBuffer){
+    const m = unpack(buf);
+    if (m.type===3){ // meta
+      if (m.gridW!==this.gridW || m.gridH!==this.gridH){ this.gridW=m.gridW; this.gridH=m.gridH; this.buf = new Uint8Array(this.gridW*this.gridH); }
+    } else if (m.type===2){ this._ver = m.ver; this.buf.fill(0); }
+    else if (m.type===1){ if (this.buf.length===0) return; if (m.ver!==this._ver) this._ver = m.ver; const {x0,y0,w,h,data}=m; for (let y=0;y<h;y++){ const srcOff=y*w; const dstOff=(y0+y)*this.gridW + x0; this.buf.set(data.slice(srcOff,srcOff+w), dstOff); } }
+  }
+}
+```
+
+---
+
+## src/web/stream-host.ts (NEW — host UI)
+
+```ts
+import { WebGpuStepper, bsToMasks } from '../gpu/stepper.js';
+import { TileStreamerHost, type TileProducer } from '../stream/tiles-host.js';
+import { connectRTC } from '../net/rtc.js';
+
+const $ = <T extends HTMLElement>(id:string)=> document.getElementById(id) as T;
+const playBtn=$('play'), stepBtn=$('step'), startBtn=$('start');
+const roomInp=$('room') as HTMLInputElement; const statusSpan=$('status');
+const ruleInp=$('rule') as HTMLInputElement; const engineSel=$('engine') as HTMLSelectElement;
+const gridSel=$('grid') as HTMLSelectElement; const info=$('info');
+
+let gridW=1024, gridH=768; let playing=false; let gpu: WebGpuStepper|null=null; let ver=0;
+
+function parseGrid(v:string){ const [w,h]=v.split('x').map(Number); gridW=w; gridH=h; }
+
+async function makeProducer(): Promise<TileProducer>{
+  if (engineSel.value==='GPU'){
+    const { birthMask, surviveMask } = bsToMasks(ruleInp.value||'B3/S23');
+    const stepper = new WebGpuStepper({ width:gridW, height:gridH, birthMask, surviveMask, useMoore:true, wrapEdges:true, seed:()=> Math.random()<0.18?1:0 });
+    await stepper.init(); gpu = stepper;
+    return {
+      gridW, gridH, tileW:64, tileH:64,
+      version: ()=> stepper.getVersion(),
+      readTile: (x0,y0,w,h)=> stepper.readTile(x0,y0,w,h)
+    };
+  } else {
+    // Simple CPU buffer evolve (B3/S23) for demo; swap with 3B workers for performance
+    const N=gridW*gridH; let A=new Uint8Array(N); for(let i=0;i<N;i++) A[i]=Math.random()<0.18?1:0; let B=new Uint8Array(N);
+    const get=(x:number,y:number)=> A[((y+gridH)%gridH)*gridW + ((x+gridW)%gridW)];
+    return {
+      gridW, gridH, tileW:64, tileH:64, version: ()=> ver,
+      readTile(x0,y0,w,h){ const out=new Uint8Array(w*h); for(let y=0;y<h;y++){ out.set(A.slice((y0+y)*gridW+x0,(y0+y)*gridW+x0+w), y*w); } return out; },
+      // Attach tick to evolve
+      tick(){
+        for(let y=0;y<gridH;y++) for(let x=0;x<gridW;x++){ let n=0; for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ if(dx||dy) n+= get(x+dx,y+dy); } const self=get(x,y); B[y*gridW+x] = self? (n===2||n===3?1:0) : (n===3?1:0); }
+        const T=A; A=B; B=T; ver++; (producer as any).version = ()=> ver; }
+    } as any as TileProducer & { tick():void };
+  }
+}
+
+let producer: (TileProducer & { tick?():void }) | null = null; let streamer: TileStreamerHost | null = null; let peer: { dc: RTCDataChannel, close():void } | null = null;
+
+async function start(){
+  parseGrid(gridSel.value);
+  producer = await makeProducer();
+  statusSpan.textContent = 'connecting…';
+  peer = await connectRTC('host', roomInp.value || 'demo');
+  peer.dc.binaryType = 'arraybuffer';
+  streamer = new TileStreamerHost(producer, (buf)=> peer!.dc.send(buf));
+  statusSpan.textContent = 'connected';
+}
+
+async function tick(){
+  if (gpu){ gpu.stepOnce(); }
+  if (producer?.tick) producer.tick();
+  await streamer?.tick();
+}
+
+function loop(){ if(!playing) return; tick().then(()=> requestAnimationFrame(loop)); }
+
+startBtn!.addEventListener('click', ()=> start());
+playBtn!.addEventListener('click', ()=>{ playing=!playing; playBtn!.textContent = playing? '⏸ Pause':'▶︎ Play'; if(playing) loop(); });
+stepBtn!.addEventListener('click', ()=>{ if(!playing) tick(); });
+```
+
+---
+
+## src/web/stream-view\.ts (NEW — viewer UI)
+
+```ts
+import { connectRTC } from '../net/rtc.js';
+import { RemoteGridBuffer } from '../stream/tiles-view.js';
+import { TiledRenderer } from '../render/tiled-renderer.js';
+
+const $ = <T extends HTMLElement>(id:string)=> document.getElementById(id) as T;
+const roomInp=$('room') as HTMLInputElement; const connectBtn=$('connect'); const statusSpan=$('status');
+const canvas=$('grid') as HTMLCanvasElement; const playBtn=$('play');
+
+let playing=true; let peer: { dc: RTCDataChannel, close():void } | null = null;
+let remote = new RemoteGridBuffer();
+let renderer = new TiledRenderer(canvas, { gridW:0, gridH:0, version:()=> remote.version(), readRect:(x0,y0,x1,y1)=>{ const w=x1-x0, h=y1-y0; const out=new Uint8Array(w*h); for(let y=0;y<h;y++){ const off=(y0+y)*remote.gridW+x0; out.set(remote.buf.slice(off,off+w), y*w); } return out; } }, 64, 64);
+let view = { x:0, y:0, zoom:4 };
+
+function loop(){ if(!playing) return; renderer.draw(view, 24).then(()=> requestAnimationFrame(loop)); }
+
+connectBtn.addEventListener('click', async ()=>{
+  statusSpan.textContent = 'connecting…';
+  peer = await connectRTC('viewer', roomInp.value || 'demo');
+  peer.dc.binaryType = 'arraybuffer';
+  peer.dc.onmessage = (ev)=>{ remote.apply(ev.data as ArrayBuffer); };
+  statusSpan.textContent = 'connected';
+  loop();
+});
+
+playBtn.addEventListener('click', ()=>{ playing=!playing; playBtn.textContent = playing? '⏸ Pause':'▶︎ Pause draw'; if(playing) loop(); });
+
+// Basic pan/zoom like 3C
+let dragging=false, lastX=0, lastY=0; canvas.addEventListener('mousedown', e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; });
+window.addEventListener('mouseup', ()=> dragging=false);
+window.addEventListener('mousemove', e=>{ if(!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; view.x = Math.max(0, Math.min(remote.gridW-1, view.x - dx/view.zoom)); view.y = Math.max(0, Math.min(remote.gridH-1, view.y - dy/view.zoom)); });
+canvas.addEventListener('wheel', e=>{ e.preventDefault(); const factor=e.deltaY<0?1.1:0.9; view.zoom=Math.max(1,Math.min(32,view.zoom*factor)); }, { passive:false });
+```
+
+---
+
+## index-3d-host.html (NEW — host launcher)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 3D – Host (Stream Tiles)</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 360px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, input, select { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 3D (Host • WebRTC Tile Streaming)</h1>
+    <small>GPU/CPU sim → tiles → RTC</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <label>Room</label>
+        <input id="room" value="demo" />
+        <button id="start">Start Server Link</button>
+        <small>Status: <span id="status">idle</span></small>
+      </div>
+      <div class="row">
+        <label>Engine</label>
+        <select id="engine"><option>GPU</option><option>CPU</option></select>
+        <label>Rule</label>
+        <input id="rule" value="B3/S23" />
+      </div>
+      <div class="row">
+        <label>Grid</label>
+        <select id="grid"><option>1024x768</option><option>1536x1024</option><option>2048x1536</option></select>
+      </div>
+      <div class="row">
+        <button id="play">▶︎ Play</button>
+        <button id="step">Step</button>
+      </div>
+      <p id="info"></p>
+    </aside>
+    <section class="panel">
+      <p>Run the viewer and join the same <strong>room</strong> to see the stream.</p>
+      <ul>
+        <li>Signaling server: <code>ws://localhost:8787</code></li>
+        <li>Tile size: 64×64 • Budget: Host sends 64 tiles/tick</li>
+      </ul>
+    </section>
+  </main>
+  <script type="module" src="/src/web/stream-host.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## index-3d-view\.html (NEW — viewer launcher)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 3D – Viewer (Receive Tiles)</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, input { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+    canvas { background:#0a0e11; border:1px solid #1b2227; border-radius:8px; image-rendering: pixelated; width:100%; height:auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 3D (Viewer • WebRTC Tile Streaming)</h1>
+    <small>Incremental tiles → 3C renderer</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <label>Room</label>
+        <input id="room" value="demo" />
+        <button id="connect">Connect</button>
+        <small>Status: <span id="status">idle</span></small>
+      </div>
+      <div class="row">
+        <button id="play">⏸ Pause draw</button>
+      </div>
+    </aside>
+    <section class="panel">
+      <canvas id="grid" width="960" height="640"></canvas>
+    </section>
+  </main>
+  <script type="module" src="/src/web/stream-view.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## README addendum (3D)
+
+````md
+### 3D – Remote Tile Streaming (WebRTC + WS Signaling)
+
+**1) Start signaling server** (one time):
+```bash
+npm i
+npm run signal:3d
+````
+
+It listens on **ws\://localhost:8787**.
+
+**2) Run the host UI** (simulation & streaming):
+
+```bash
+npm run dev:3d
+```
+
+Open **[http://localhost:5173/index-3d-host.html](http://localhost:5173/index-3d-host.html)**, pick a **room** (e.g., `demo`), click **Start Server Link**, then **Play**.
+
+**3) Run the viewer UI** (remote visualization):
+Open **[http://localhost:5173/index-3d-view.html](http://localhost:5173/index-3d-view.html)**, enter the same **room**, click **Connect**.
+
+**Notes**
+
+* Packets are binary: a tiny header + w×h bytes (0/1). Versions ensure viewers apply frames consistently.
+* Host sends **64 tiles per tick** by default; adjust for bandwidth/JITer. Viewer’s 3C renderer redraws under its own tile budget.
+* Replace the CPU evolve in `stream-host.ts` with the 3B worker stepper for large CPUs, or keep the 3A GPU stepper.
+* Fallback WS transport is scaffolded (`ws-fallback.ts`) if you prefer not to use WebRTC in your environment.
+
+```
+```

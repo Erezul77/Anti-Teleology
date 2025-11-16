@@ -1,0 +1,408 @@
+# MPL – Stage 3A (WebGPU Acceleration + Worker Fallback)
+
+Stage **3** focuses on **performance & scale**. We start with **3A**: a fast WebGPU stepper for Life‑like rules (B/S) with an automatic **CPU fallback** (existing interpreter) if WebGPU isn’t available.
+
+> Next stages (preview): 3B workers (multi‑threaded CPU), 3C tiled multi‑grid, 3D remote streaming, 3E profiler/bench.
+
+---
+
+## Directory Tree (updated)
+
+```
+MPL-Stage-3/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ runtime/                 # (existing)
+│  │  ├─ interpreter.ts
+│  │  ├─ monad.ts
+│  │  ├─ grid.ts
+│  │  └─ topology/index.ts
+│  ├─ web/
+│  │  ├─ rulespec.ts
+│  │  ├─ prng.ts
+│  │  └─ gpu-main.ts          # NEW: 3A UI w/ GPU + CPU fallback
+│  └─ gpu/
+│     ├─ life.wgsl.ts         # NEW: WGSL compute shader (B/S, Moore/VonNeumann)
+│     └─ stepper.ts           # NEW: WebGPU stepper wrapper
+└─ index-3a.html               # NEW: Stage 3A launcher
+```
+
+Add to **package.json** scripts:
+
+```json
+{
+  "scripts": {
+    "dev:3a": "vite --open index-3a.html"
+  }
+}
+```
+
+---
+
+## src/gpu/life.wgsl.ts (NEW — WGSL compute shader)
+
+```ts
+// Moore/VonNeumann, Clip or Wrap edges.
+// Inputs: stateIn[u32], stateOut[u32], uniforms with width/height, birth/survive bitmasks, flags.
+
+export default /* wgsl */ `
+struct Uniforms {
+  width : u32,
+  height : u32,
+  birthMask : u32,    // bit i set => birth on i neighbors
+  surviveMask : u32,  // bit i set => survive on i neighbors
+  useMoore : u32,     // 1 Moore, 0 VonNeumann
+  wrapEdges : u32     // 1 wrap, 0 clip
+};
+
+@group(0) @binding(0) var<storage, read> stateIn : array<u32>;
+@group(0) @binding(1) var<storage, read_write> stateOut : array<u32>;
+@group(0) @binding(2) var<uniform> U : Uniforms;
+
+fn idx(x:u32, y:u32) -> u32 { return y * U.width + x; }
+
+fn inBounds(x:i32, y:i32) -> bool {
+  return x >= 0 && y >= 0 && x < i32(U.width) && y < i32(U.height);
+}
+
+fn wrap(x:i32, m:i32) -> i32 { var r = x % m; return select(r + m, r, r >= 0); }
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= U.width || gid.y >= U.height) { return; }
+
+  let x = i32(gid.x);
+  let y = i32(gid.y);
+
+  var n : u32 = 0u;
+  if (U.useMoore == 1u) {
+    // 8 neighbors
+    for (var dy:i32 = -1; dy <= 1; dy++) {
+      for (var dx:i32 = -1; dx <= 1; dx++) {
+        if (dx == 0 && dy == 0) { continue; }
+        var nx = x + dx; var ny = y + dy;
+        if (U.wrapEdges == 1u) {
+          nx = wrap(nx, i32(U.width));
+          ny = wrap(ny, i32(U.height));
+          let alive = stateIn[idx(u32(nx), u32(ny))];
+          n += alive & 1u;
+        } else {
+          if (inBounds(nx, ny)) { let alive = stateIn[idx(u32(nx), u32(ny))]; n += alive & 1u; }
+        }
+      }
+    }
+  } else {
+    // VonNeumann 4 neighbors
+    let offs = array<vec2<i32>,4>(vec2<i32>(1,0), vec2<i32>(-1,0), vec2<i32>(0,1), vec2<i32>(0,-1));
+    for (var i:i32=0; i<4; i++) {
+      var nx = x + offs[i].x; var ny = y + offs[i].y;
+      if (U.wrapEdges == 1u) {
+        nx = wrap(nx, i32(U.width)); ny = wrap(ny, i32(U.height));
+        let alive = stateIn[idx(u32(nx), u32(ny))]; n += alive & 1u;
+      } else {
+        if (inBounds(nx, ny)) { let alive = stateIn[idx(u32(nx), u32(ny))]; n += alive & 1u; }
+      }
+    }
+  }
+
+  let self = stateIn[idx(gid.x, gid.y)] & 1u;
+  let birth = (U.birthMask >> n) & 1u;
+  let survive = (U.surviveMask >> n) & 1u;
+  let next = select(birth, survive, self == 1u);
+  stateOut[idx(gid.x, gid.y)] = next;
+}
+`;
+```
+
+---
+
+## src/gpu/stepper.ts (NEW — WebGPU stepper wrapper)
+
+```ts
+import shaderCode from './life.wgsl.ts';
+
+export type GpuOpts = {
+  width: number; height: number;
+  birthMask: number; surviveMask: number;
+  useMoore: boolean; wrapEdges: boolean;
+  seed?: (x:number,y:number)=>number; // return 0/1
+};
+
+export class WebGpuStepper {
+  device!: GPUDevice; queue!: GPUQueue; pipeline!: GPUComputePipeline;
+  bind!: GPUBindGroup; ubuf!: GPUBuffer; a!: GPUBuffer; b!: GPUBuffer;
+  width: number; height: number; size: number;
+
+  constructor(private opts: GpuOpts){ this.width=opts.width; this.height=opts.height; this.size=opts.width*opts.height; }
+
+  static async isSupported(){ return !!navigator.gpu; }
+
+  async init(){
+    const adapter = await navigator.gpu!.requestAdapter();
+    if (!adapter) throw new Error('No WebGPU adapter');
+    this.device = await adapter.requestDevice();
+    this.queue = this.device.queue;
+
+    const module = this.device.createShaderModule({ code: shaderCode });
+    this.pipeline = await this.device.createComputePipeline({
+      layout: 'auto',
+      compute: { module, entryPoint: 'main' }
+    });
+
+    // Buffers
+    const bytes = this.size * 4;
+    this.a = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.b = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+
+    const u32 = new Uint32Array([
+      this.width, this.height,
+      this.opts.birthMask >>> 0, this.opts.surviveMask >>> 0,
+      this.opts.useMoore ? 1 : 0, this.opts.wrapEdges ? 1 : 0
+    ]);
+    this.ubuf = this.device.createBuffer({
+      size: u32.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Uint32Array(this.ubuf.getMappedRange()).set(u32); this.ubuf.unmap();
+
+    // Seed
+    const seedArr = new Uint32Array(this.size);
+    for (let y=0;y<this.height;y++) for (let x=0;x<this.width;x++) seedArr[y*this.width+x] = this.opts.seed?.(x,y)?1:0;
+    this.queue.writeBuffer(this.a, 0, seedArr);
+
+    this.bind = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.a } },
+      { binding: 1, resource: { buffer: this.b } },
+      { binding: 2, resource: { buffer: this.ubuf } },
+    ]});
+  }
+
+  stepOnce(){
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, this.bind);
+    const gx = Math.ceil(this.width/16), gy = Math.ceil(this.height/16);
+    pass.dispatchWorkgroups(gx, gy);
+    pass.end();
+    this.queue.submit([encoder.finish()]);
+    // swap buffers by re‑binding
+    const tmp = this.a; this.a = this.b; this.b = tmp;
+    this.bind = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.a } },
+      { binding: 1, resource: { buffer: this.b } },
+      { binding: 2, resource: { buffer: this.ubuf } },
+    ]});
+  }
+
+  async readback(): Promise<Uint8Array>{
+    const bytes = this.size*4;
+    const buf = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.a, 0, buf, 0, bytes);
+    this.queue.submit([encoder.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const copy = new Uint8Array(buf.getMappedRange()).slice();
+    buf.unmap();
+    return copy; // u32 little‑endian values 0/1
+  }
+}
+
+export function bsToMasks(bs: string){
+  const m = bs.trim().toUpperCase().match(/^(?:B([0-8]*)\/S([0-8]*))|(?:S([0-8]*)\/B([0-8]*))$/);
+  if (!m) throw new Error('Invalid B/S rule');
+  const b = (m[1] ?? m[4] ?? '').split('').filter(Boolean).map(Number);
+  const s = (m[2] ?? m[3] ?? '').split('').filter(Boolean).map(Number);
+  let birth=0, surv=0; for (const n of b) birth |= (1<<n); for (const n of s) surv |= (1<<n);
+  return { birthMask: birth>>>0, surviveMask: surv>>>0 };
+}
+```
+
+---
+
+## src/web/gpu-main.ts (NEW — 3A UI with GPU + CPU fallback)
+
+```ts
+import { WebGpuStepper, bsToMasks } from '../gpu/stepper.ts';
+import { Grid2D } from '../runtime/grid.ts';
+import { Interpreter } from '../runtime/interpreter.ts';
+import { Moore, VonNeumann, Toroidal } from '../runtime/topology/index.ts';
+import { Monad } from '../runtime/monad.ts';
+
+const $ = <T extends HTMLElement>(id:string)=> document.getElementById(id) as T;
+const canvas = $('grid') as HTMLCanvasElement; const ctx = canvas.getContext('2d')!;
+const playBtn=$('play'), stepBtn=$('step'), seedBtn=$('seed');
+const modeLbl=$('mode'); const ruleInp = $('rule') as HTMLInputElement;
+const topoSel=$('topo') as HTMLSelectElement; const edgeSel=$('edges') as HTMLSelectElement;
+const speedInp=$('speed') as HTMLInputElement; const speedLbl=$('speedLabel');
+
+let width=128, height=96, cell=6; canvas.width=width*cell; canvas.height=height*cell;
+let useGPU=false; let playing=false; let ms=Number(speedInp.value)||60;
+
+let gpu: WebGpuStepper | null = null;
+let cpu: Grid2D | null = null; let interpreter: Interpreter | null = null;
+
+function setSpeed(){ speedLbl.textContent=`${ms} ms/step`; }
+setSpeed();
+
+function randomSeed(p=0.22){ return (x:number,y:number)=> Math.random()<p?1:0; }
+
+function drawCells(bits: Uint8Array){
+  ctx.fillStyle = '#0a0e11'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#e8eef2';
+  for (let y=0;y<height;y++){
+    for (let x=0;x<width;x++){
+      if (bits[(y*width+x)*4] & 1){ ctx.fillRect(x*cell, y*cell, cell, cell); }
+    }
+  }
+  // grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth=1;
+  for (let x=0;x<=width;x++){ ctx.beginPath(); ctx.moveTo(x*cell+0.5,0); ctx.lineTo(x*cell+0.5,canvas.height); ctx.stroke(); }
+  for (let y=0;y<=height;y++){ ctx.beginPath(); ctx.moveTo(0,y*cell+0.5); ctx.lineTo(canvas.width,y*cell+0.5); ctx.stroke(); }
+}
+
+function drawCPU(){
+  ctx.fillStyle = '#0a0e11'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#e8eef2';
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++){ const m=(cpu as any).cells[y][x]; if (m?.state?.alive) ctx.fillRect(x*cell,y*cell,cell,cell); }
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth=1;
+  for (let x=0;x<=width;x++){ ctx.beginPath(); ctx.moveTo(x*cell+0.5,0); ctx.lineTo(x*cell+0.5,canvas.height); ctx.stroke(); }
+  for (let y=0;y<=height;y++){ ctx.beginPath(); ctx.moveTo(0,y*cell+0.5); ctx.lineTo(canvas.width,y*cell+0.5); ctx.stroke(); }
+}
+
+async function initGPU(seed=0.22){
+  const { birthMask, surviveMask } = bsToMasks(ruleInp.value||'B3/S23');
+  const useMoore = topoSel.value==='Moore'; const wrapEdges = edgeSel.value==='Wrap';
+  gpu = new WebGpuStepper({ width, height, birthMask, surviveMask, useMoore, wrapEdges, seed: randomSeed(seed) });
+  await gpu.init();
+  useGPU = true; modeLbl.textContent = 'WebGPU';
+  drawCells(await gpu.readback());
+}
+
+function initCPU(seed=0.22){
+  const useMoore = topoSel.value==='Moore'; const wrapEdges = edgeSel.value==='Wrap';
+  const base = useMoore? new Moore() : new VonNeumann();
+  const topo = wrapEdges? new Toroidal(base, ()=>({width,height})) : base;
+  interpreter = new Interpreter([
+    { kind: 'if', condition: (ctx, env)=> !!ctx.state.alive, then: (ctx, env)=>{ const n=env?.countNeighbors(n=> !!n.state.alive)??0; const S=(ruleInp.value||'B3/S23').toUpperCase().split('/')[1].replace('S',''); if (!S.includes(String(n))) env?.mut?.set('state.alive',false);} },
+    { kind: 'unless', condition: (ctx, env)=> !!ctx.state.alive, then: (ctx, env)=>{ const n=env?.countNeighbors(n=> !!n.state.alive)??0; const B=(ruleInp.value||'B3/S23').toUpperCase().split('/')[0].replace('B',''); if (B.includes(String(n))) env?.mut?.set('state.alive',true);} },
+  ]);
+  cpu = new Grid2D(width, height, interpreter, topo);
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++) (cpu as any).cells[y][x] = Math.random()<seed? new Monad({alive:true}) : null;
+  useGPU = false; modeLbl.textContent = 'CPU';
+  drawCPU();
+}
+
+async function tryInit(){
+  if (await WebGpuStepper.isSupported()) { try { await initGPU(0.22); return; } catch(e){ console.warn(e); } }
+  initCPU(0.22);
+}
+
+async function tick(){
+  if (useGPU && gpu){ gpu.stepOnce(); const bits = await gpu.readback(); drawCells(bits); }
+  else if (cpu){ cpu.tick(); drawCPU(); }
+}
+
+function loop(){ if(!playing) return; const t0=performance.now(); tick(); const dt=Math.max(0, ms-(performance.now()-t0)); setTimeout(loop, dt); }
+
+// UI events
+playBtn!.addEventListener('click', ()=>{ playing=!playing; playBtn!.textContent = playing? '⏸ Pause':'▶︎ Play'; if(playing) loop(); });
+stepBtn!.addEventListener('click', ()=>{ if(!playing) tick(); });
+seedBtn!.addEventListener('click', async ()=>{ if (useGPU && gpu){ await initGPU(0.22); } else { initCPU(0.22); } });
+speedInp.addEventListener('input', ()=>{ ms=Number(speedInp.value)||60; speedLbl.textContent=`${ms} ms/step`; });
+ruleInp.addEventListener('change', async ()=>{ await tryInit(); });
+topoSel.addEventListener('change', async ()=>{ await tryInit(); });
+edgeSel.addEventListener('change', async ()=>{ await tryInit(); });
+
+tryInit();
+```
+
+---
+
+## index-3a.html (NEW — Stage 3A launcher)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 3A – WebGPU Acceleration</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 320px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, input, select { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+    canvas { background:#0a0e11; border:1px solid #1b2227; border-radius:8px; image-rendering: pixelated; width:100%; height:auto; }
+    small { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 3A (WebGPU Acceleration + Worker Fallback)</h1>
+    <small>GPU compute for Life‑like rules • Auto CPU fallback</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row"><strong>Mode:</strong> <span id="mode">—</span></div>
+      <div class="row">
+        <label>Rule</label>
+        <input id="rule" value="B3/S23" />
+      </div>
+      <div class="row">
+        <label>Topology</label>
+        <select id="topo"><option>Moore</option><option>VonNeumann</option></select>
+        <label>Edges</label>
+        <select id="edges"><option>Clip</option><option>Wrap</option></select>
+      </div>
+      <div class="row">
+        <label>Speed</label>
+        <input id="speed" type="range" min="16" max="500" value="60" />
+        <small id="speedLabel"></small>
+      </div>
+      <div class="row">
+        <button id="play">▶︎ Play</button>
+        <button id="step">Step</button>
+        <button id="seed">Reseed</button>
+      </div>
+      <div class="row"><small>⚠︎ WebGPU required for GPU mode (Chrome/Edge ≥ 113+ with hardware support). Otherwise falls back to CPU.</small></div>
+    </aside>
+    <section class="panel">
+      <canvas id="grid" width="768" height="576"></canvas>
+    </section>
+  </main>
+  <script type="module" src="/src/web/gpu-main.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## README addendum (3A)
+
+````md
+### 3A – WebGPU Acceleration + Worker Fallback
+
+Run:
+```bash
+npm i
+npm run dev:3a
+````
+
+* If **WebGPU** is available, the stepper runs on GPU using a compute shader with bit‑masks for B/S rules.
+* Otherwise, it falls back to the existing CPU interpreter (Moore/VonNeumann, Clip/Wrap).
+
+**Notes**
+
+* The shader uses 16×16 workgroups and supports **Moore** (8‑nbr) and **VonNeumann** (4‑nbr) neighborhoods, with **wrapped** or **clipped** edges.
+* Rendering uses a 2D canvas by reading back the GPU buffer (fine for moderate grids). 3B will add **workers** and 3C a **tiled** renderer.
+
+```
+```

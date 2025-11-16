@@ -1,0 +1,138 @@
+# MPL Stage 2F – Visualization Hooks
+
+In this stage we add **visual output options** to make the evolving grid easier to observe. Stage 2F provides both:
+
+* ASCII renderers (already present in 2A–2E)
+* **Image-based renderer** using Canvas / Node-canvas
+* A simple live HTML view for browser visualization
+
+---
+
+## What’s included
+
+* `src/vis/ascii.ts` – improved ASCII renderer with optional color codes
+* `src/vis/canvas.ts` – Node-canvas image renderer (PNG snapshots)
+* `examples/run-2f.ts` – demo that runs a Life pattern and dumps PNG frames
+* `public/vis.html` – minimal browser viewer with JS bundle
+
+---
+
+## src/vis/ascii.ts
+
+```ts
+import chalk from 'chalk';
+import { Grid2D } from '../runtime/grid.js';
+
+export function renderAscii(grid: Grid2D, field: string = 'alive'): string {
+  return grid.cells.map(row => row.map(cell => {
+    if (!cell) return '.';
+    const v = cell.state[field];
+    return v ? chalk.green('█') : chalk.gray('·');
+  }).join('')).join('\n');
+}
+```
+
+---
+
+## src/vis/canvas.ts
+
+```ts
+import { createCanvas } from 'canvas';
+import fs from 'fs';
+import { Grid2D } from '../runtime/grid.js';
+
+export function renderPng(grid: Grid2D, field: string, outPath: string, cellSize = 10){
+  const canvas = createCanvas(grid.width*cellSize, grid.height*cellSize);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  for (let y=0; y<grid.height; y++){
+    for (let x=0; x<grid.width; x++){
+      const cell = grid.cells[y][x];
+      if (cell && cell.state[field]){
+        ctx.fillStyle = 'black';
+        ctx.fillRect(x*cellSize, y*cellSize, cellSize, cellSize);
+      }
+    }
+  }
+  const buf = canvas.toBuffer('image/png');
+  fs.writeFileSync(outPath, buf);
+}
+```
+
+---
+
+## examples/run-2f.ts
+
+```ts
+import { Interpreter, Rule } from '../src/runtime/interpreter.js';
+import { Grid2D } from '../src/runtime/grid.js';
+import { Moore } from '../src/runtime/topology/index.js';
+import { Monad } from '../src/runtime/monad.js';
+import { renderAscii } from '../src/vis/ascii.js';
+import { renderPng } from '../src/vis/canvas.js';
+import fs from 'fs';
+
+const rules: Rule[] = [
+  { kind: 'if', condition: (ctx, env) => !!ctx.state.alive, then: (ctx, env) => {
+      const n = env?.countNeighbors(n => !!n.state.alive) ?? 0;
+      if (n < 2 || n > 3) env?.mut?.set('state.alive', false);
+    } },
+  { kind: 'unless', condition: (ctx, env) => !!ctx.state.alive, then: (ctx, env) => {
+      const n = env?.countNeighbors(n => !!n.state.alive) ?? 0;
+      if (n === 3) env?.mut?.set('state.alive', true);
+    } },
+];
+
+const interpreter = new Interpreter(rules);
+const grid = new Grid2D(20,20, interpreter, new Moore());
+
+// Seed a glider
+const m = (x:number,y:number)=> grid.place({x,y}, new Monad({alive:true}));
+m(1,0);m(2,1);m(0,2);m(1,2);m(2,2);
+
+fs.mkdirSync('frames',{recursive:true});
+for (let i=0; i<10; i++){
+  console.log(renderAscii(grid));
+  renderPng(grid, 'alive', `frames/frame-${i}.png`);
+  grid.tick();
+}
+```
+
+---
+
+## README addendum (2F)
+
+````md
+### 2F – Visualization
+
+Two options:
+1. **ASCII** (console):
+```ts
+import { renderAscii } from './src/vis/ascii.js';
+console.log(renderAscii(grid));
+````
+
+2. **PNG snapshots** (requires `npm install canvas`):
+
+```ts
+import { renderPng } from './src/vis/canvas.js';
+renderPng(grid, 'alive', 'frame.png');
+```
+
+Run demo:
+
+```bash
+npx ts-node examples/run-2f.ts
+```
+
+Result: ASCII in console + PNG frames in `/frames`.
+
+```
+
+---
+
+With this, Stage 2F provides both quick ASCII previews and richer image snapshots. Next step could be **Stage 2G**: live browser-based visualization or interactive controls.
+
+```

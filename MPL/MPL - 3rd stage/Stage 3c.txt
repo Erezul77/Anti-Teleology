@@ -1,0 +1,382 @@
+# MPL – Stage 3C (Tiled Renderer + Incremental Readback for Huge Grids)
+
+Stage **3C** makes the viewport **scale to very large grids** without dropping frames. We add a **tiled renderer** that redraws only the visible tiles and performs **incremental readback** from GPU/CPU buffers under a per‑frame time budget.
+
+* **Tile cache** with per‑tile dirty versions
+* **Incremental readback**: N tiles per frame (configurable budget)
+* **Pan/zoom** with pixel‑perfect snapping at integer zooms (and smooth fractional zooms)
+* Works with: **GPU stepper (3A)**, **Workers stepper (3B)**, or **single‑thread CPU**
+
+---
+
+## Directory Tree (updated)
+
+```
+MPL-Stage-3/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ gpu/
+│  │  ├─ life.wgsl.ts
+│  │  ├─ stepper.ts               # UPDATED: add readTile() and invalidate()
+│  ├─ workers/
+│  │  └─ step-worker.ts
+│  ├─ render/
+│  │  ├─ tiles.ts                 # NEW: tiling math + cache
+│  │  └─ tiled-renderer.ts        # NEW: incremental renderer
+│  └─ web/
+│     └─ tiled-main.ts            # NEW: 3C UI (pan/zoom + engines)
+└─ index-3c.html                  # NEW: Stage 3C launcher
+```
+
+Add to **package.json**:
+
+```json
+{
+  "scripts": {
+    "dev:3c": "vite --open index-3c.html"
+  }
+}
+```
+
+---
+
+## src/gpu/stepper.ts (UPDATED — add `readTile` + `invalidate`)
+
+```ts
+// … existing imports & class WebGpuStepper from 3A …
+// Add after readback():
+
+  private version = 0; // bump every step
+  getVersion(){ return this.version; }
+
+  stepOnce(){
+    // existing compute dispatch …
+    this.version++;
+    // …
+  }
+
+  /** Read a rectangular tile (x0,y0,w,h) as Uint8Array of 0/1. Efficient by row copies. */
+  async readTile(x0:number, y0:number, w:number, h:number): Promise<Uint8Array> {
+    const bytesPerCell = 4; // u32 in GPU buffer
+    const rowBytesSrc = this.width * bytesPerCell;
+    const rowBytesDst = w * bytesPerCell;
+    const out = new Uint8Array(w*h);
+
+    // staging buffer big enough for one row of the tile
+    const staging = this.device.createBuffer({ size: rowBytesDst, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder();
+
+    for (let y=0; y<h; y++){
+      const srcOffset = ((y0+y) * this.width + x0) * bytesPerCell;
+      encoder.copyBufferToBuffer(this.a, srcOffset, staging, 0, rowBytesDst);
+      this.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const row = new Uint8Array(staging.getMappedRange()).slice();
+      staging.unmap();
+      for (let x=0; x<w; x++) out[y*w+x] = row[x*4] & 1; // lowest bit
+    }
+    return out;
+  }
+
+  /** If external code changed grid size or re‑seeded, manually bump version. */
+  invalidate(){ this.version++; }
+```
+
+> Note: This simple per‑row copy keeps code clear. If you need higher throughput, promote to a persistent staging buffer and batch multiple rows before `submit`.
+
+---
+
+## src/render/tiles.ts (NEW — tiling math + cache)
+
+```ts
+export type Viewport = { x:number; y:number; zoom:number }; // x,y in cell coords (top‑left), zoom in px per cell
+export type Tiling = { tileW:number; tileH:number };
+export type TileKey = string; // `${tx}:${ty}`
+
+export function tileKey(tx:number, ty:number){ return `${tx}:${ty}`; }
+
+export function tilesInView(gridW:number, gridH:number, view:Viewport, canvasW:number, canvasH:number, tiling:Tiling){
+  const cw = view.zoom, ch = view.zoom;
+  const x0 = Math.floor(view.x); const y0 = Math.floor(view.y);
+  const x1 = Math.ceil(view.x + canvasW / cw);
+  const y1 = Math.ceil(view.y + canvasH / ch);
+  const tW = tiling.tileW, tH=tiling.tileH;
+  const tx0 = Math.floor(x0 / tW), ty0 = Math.floor(y0 / tH);
+  const tx1 = Math.floor((x1-1) / tW), ty1 = Math.floor((y1-1) / tH);
+  const out:{tx:number;ty:number;x0:number;y0:number;x1:number;y1:number;}[]=[];
+  for (let ty=ty0; ty<=ty1; ty++) for (let tx=tx0; tx<=tx1; tx++){
+    const rx0 = tx*tW, ry0 = ty*tH; const rx1=Math.min(gridW, rx0+tW), ry1=Math.min(gridH, ry0+tH);
+    if (rx0<rx1 && ry0<ry1) out.push({tx,ty,x0:rx0,y0:ry0,x1:rx1,y1:ry1});
+  }
+  return out;
+}
+
+export type TileBitmap = { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; ver: number };
+
+export class TileCache {
+  private map = new Map<TileKey, TileBitmap>();
+  constructor(public tileW:number, public tileH:number){}
+  get(tx:number, ty:number){
+    const key = tileKey(tx,ty); let t = this.map.get(key);
+    if (!t){ const c=document.createElement('canvas'); c.width=this.tileW; c.height=this.tileH; const ctx=c.getContext('2d')!; t={canvas:c, ctx, ver:-1}; this.map.set(key,t);} 
+    return t!;
+  }
+  clear(){ this.map.clear(); }
+}
+```
+
+---
+
+## src/render/tiled-renderer.ts (NEW — incremental renderer)
+
+```ts
+import { TileCache, tilesInView, type Viewport } from './tiles.js';
+
+export type CellSource = {
+  gridW:number; gridH:number;
+  /** current version counter, increments when simulation advances */
+  version(): number;
+  /** read (x0..x1-1, y0..y1-1) inclusive rectangle as Uint8Array of 0/1 (row‑major) */
+  readRect(x0:number,y0:number,x1:number,y1:number): Promise<Uint8Array> | Uint8Array;
+};
+
+export class TiledRenderer {
+  private cache: TileCache; private lastVer = -1;
+  constructor(private canvas: HTMLCanvasElement, private src: CellSource, private tileW=64, private tileH=64){
+    this.cache = new TileCache(tileW, tileH);
+  }
+  setSource(src: CellSource){ this.src = src; this.cache.clear(); this.lastVer = -1; }
+
+  async draw(view: Viewport, budgetTiles=8){
+    const ctx = this.canvas.getContext('2d')!; const W=this.canvas.width, H=this.canvas.height;
+    // Fill background
+    ctx.fillStyle='#0a0e11'; ctx.fillRect(0,0,W,H);
+
+    const vis = tilesInView(this.src.gridW, this.src.gridH, view, W, H, {tileW:this.tileW, tileH:this.tileH});
+
+    // When version changes, tiles must refresh lazily
+    const v = this.src.version(); const needRefresh = v !== this.lastVer; if (needRefresh) this.lastVer = v;
+
+    // Redraw up to budget tiles per call
+    let updated = 0;
+    for (const t of vis){
+      const tb = this.cache.get(t.tx,t.ty);
+      if (tb.ver !== v && updated < budgetTiles){
+        const w=t.x1-t.x0, h=t.y1-t.y0;
+        const buf = await this.src.readRect(t.x0,t.y0,t.x1,t.y1);
+        // paint into tile canvas
+        const id = tb.ctx.createImageData(w,h);
+        for (let i=0;i<w*h;i++){ const on = (buf[i] & 1); const j=i*4; const c= on? 232:10; id.data[j]=c; id.data[j+1]=on?238:14; id.data[j+2]=on?242:17; id.data[j+3]=255; }
+        tb.ctx.putImageData(id, 0, 0);
+        tb.ver = v; updated++;
+      }
+      // blit tile into viewport with scaling
+      const px0 = Math.floor((t.x0 - view.x) * view.zoom);
+      const py0 = Math.floor((t.y0 - view.y) * view.zoom);
+      const pw = Math.ceil((t.x1 - t.x0) * view.zoom);
+      const ph = Math.ceil((t.y1 - t.y0) * view.zoom);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tb.canvas, 0,0, tb.canvas.width, tb.canvas.height, px0, py0, pw, ph);
+    }
+
+    // Optional: draw grid lines when zoom >= 6
+    if (view.zoom >= 6){
+      ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth=1;
+      for (let x=Math.floor(view.x); x<Math.min(this.src.gridW, Math.ceil(view.x + W/view.zoom)); x++){
+        const px = Math.round((x - view.x) * view.zoom) + 0.5; ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,H); ctx.stroke();
+      }
+      for (let y=Math.floor(view.y); y<Math.min(this.src.gridH, Math.ceil(view.y + H/view.zoom)); y++){
+        const py = Math.round((y - view.y) * view.zoom) + 0.5; ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(W,py); ctx.stroke();
+      }
+    }
+  }
+}
+```
+
+---
+
+## src/web/tiled-main.ts (NEW — UI + engines + pan/zoom)
+
+```ts
+import { TiledRenderer } from '../render/tiled-renderer.js';
+import { WebGpuStepper, bsToMasks } from '../gpu/stepper.js';
+
+// Minimal CPU source using a shared Uint8Array reference (from 3B paths)
+class CpuSource {
+  constructor(public buf: Uint8Array, public gridW:number, public gridH:number, private _ver=0){}
+  bump(){ this._ver++; }
+  version(){ return this._ver; }
+  readRect(x0:number,y0:number,x1:number,y1:number){
+    const w=x1-x0, h=y1-y0; const out=new Uint8Array(w*h);
+    for(let y=0;y<h;y++){ const offSrc=(y0+y)*this.gridW + x0; out.set(this.buf.slice(offSrc, offSrc+w), y*w); }
+    return out;
+  }
+}
+
+const $ = <T extends HTMLElement>(id:string)=> document.getElementById(id) as T;
+const canvas = $('grid') as HTMLCanvasElement; const ctx = canvas.getContext('2d')!;
+const playBtn=$('play'), stepBtn=$('step'), engineSel=$('engine') as HTMLSelectElement;
+const ruleInp=$('rule') as HTMLInputElement; const zoomInp=$('zoom') as HTMLInputElement; const zoomLbl=$('zoomLabel');
+const budgetInp=$('budget') as HTMLInputElement; const budgetLbl=$('budgetLabel');
+
+let gridW=1024, gridH=768; canvas.width=960; canvas.height=640;
+let view = { x:0, y:0, zoom:4 };
+let playing=false; let budget=Number(budgetInp.value)||8;
+
+let renderer: TiledRenderer;
+let gpu: WebGpuStepper | null = null; let cpuSrc: CpuSource | null = null;
+
+function setZoom(z:number){ view.zoom = Math.max(1, Math.min(32, z)); zoomLbl.textContent = `${view.zoom.toFixed(2)} px/cell`; }
+setZoom(Number(zoomInp.value)||4);
+function setBudget(n:number){ budget = Math.max(1, Math.min(256, n)); budgetLbl.textContent = `${budget} tiles/frame`; }
+setBudget(Number(budgetInp.value)||8);
+
+// Simple drag pan + wheel zoom
+let dragging=false, lastX=0, lastY=0;
+canvas.addEventListener('mousedown', e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; });
+window.addEventListener('mouseup', ()=> dragging=false);
+window.addEventListener('mousemove', e=>{ if(!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; view.x = Math.max(0, Math.min(gridW-1, view.x - dx/view.zoom)); view.y = Math.max(0, Math.min(gridH-1, view.y - dy/view.zoom)); });
+canvas.addEventListener('wheel', e=>{ e.preventDefault(); const factor = e.deltaY<0? 1.1 : 0.9; const zx=view.zoom*factor; setZoom(zx); }, { passive:false });
+
+async function initEngine(){
+  const mode = engineSel.value;
+  if (mode==='GPU'){
+    const { birthMask, surviveMask } = bsToMasks(ruleInp.value||'B3/S23');
+    gpu = new WebGpuStepper({ width:gridW, height:gridH, birthMask, surviveMask, useMoore:true, wrapEdges:true, seed: ()=> Math.random()<0.15?1:0 });
+    await gpu.init();
+    cpuSrc = null;
+    renderer = new TiledRenderer(canvas, {
+      gridW, gridH,
+      version: ()=> gpu!.getVersion(),
+      readRect: (x0,y0,x1,y1)=> gpu!.readTile(x0,y0,x1-x0,y1-y0)
+    }, 64, 64);
+  } else {
+    // CPU fallback: keep a Uint8Array buffer and step it per tick (naive for demo); workers from 3B can plug here.
+    const N = gridW*gridH; const A = new Uint8Array(N); for (let i=0;i<N;i++) A[i] = Math.random()<0.15?1:0; cpuSrc = new CpuSource(A, gridW, gridH, 0);
+    renderer = new TiledRenderer(canvas, cpuSrc, 64, 64);
+  }
+}
+
+async function step(){
+  if (gpu){ gpu.stepOnce(); }
+  else if (cpuSrc){ // very simple B3/S23 step for demo (optimize/parallelize via 3B in real use)
+    const W=gridW, H=gridH; const src=cpuSrc.buf; const dst=new Uint8Array(src.length);
+    const get=(x:number,y:number)=> src[((y+H)%H)*W + ((x+W)%W)] & 1;
+    for (let y=0;y<H;y++) for(let x=0;x<W;x++){
+      let n=0; for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ if(dx||dy) n+= get(x+dx,y+dy); }
+      const self = get(x,y); const next = self? (n===2||n===3?1:0) : (n===3?1:0); dst[y*W+x] = next;
+    }
+    cpuSrc.buf.set(dst); cpuSrc.bump();
+  }
+  await renderer.draw(view, budget);
+}
+
+function loop(){ if(!playing) return; step().then(()=>{ requestAnimationFrame(loop); }); }
+
+playBtn!.addEventListener('click', ()=>{ playing=!playing; playBtn!.textContent = playing? '⏸ Pause':'▶︎ Play'; if(playing) loop(); });
+stepBtn!.addEventListener('click', ()=>{ if(!playing) step(); });
+zoomInp.addEventListener('input', ()=> setZoom(Number(zoomInp.value)||4));
+budgetInp.addEventListener('input', ()=> setBudget(Number(budgetInp.value)||8));
+ruleInp.addEventListener('change', ()=> initEngine());
+engineSel.addEventListener('change', ()=> initEngine());
+
+initEngine().then(()=> renderer.draw(view, budget));
+```
+
+---
+
+## index-3c.html (NEW — Stage 3C launcher)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 3C – Tiled Renderer + Incremental Readback</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, input, select { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+    canvas { background:#0a0e11; border:1px solid #1b2227; border-radius:8px; image-rendering: pixelated; width:100%; height:auto; }
+    small { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 3C (Tiled Renderer + Incremental Readback)</h1>
+    <small>Only draw visible tiles • GPU/CPU compatible • Pan/zoom</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <label>Engine</label>
+        <select id="engine"><option>GPU</option><option>CPU</option></select>
+      </div>
+      <div class="row">
+        <label>Rule</label>
+        <input id="rule" value="B3/S23" />
+      </div>
+      <div class="row">
+        <label>Zoom</label>
+        <input id="zoom" type="range" min="1" max="32" step="0.25" value="4" />
+        <small id="zoomLabel"></small>
+      </div>
+      <div class="row">
+        <label>Tile budget</label>
+        <input id="budget" type="range" min="1" max="256" value="8" />
+        <small id="budgetLabel"></small>
+      </div>
+      <div class="row">
+        <button id="play">▶︎ Play</button>
+        <button id="step">Step</button>
+      </div>
+      <div class="row"><small>Tip: increase tile budget when panning quickly; lower to keep 60 fps while simulating very large grids.</small></div>
+    </aside>
+    <section class="panel">
+      <canvas id="grid" width="960" height="640"></canvas>
+    </section>
+  </main>
+  <script type="module" src="/src/web/tiled-main.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## README addendum (3C)
+
+````md
+### 3C – Tiled Renderer + Incremental Readback
+
+Run:
+```bash
+npm i
+npm run dev:3c
+````
+
+**Why tiles?**
+
+* Full‑buffer readback and repaint is O(W×H) per frame — prohibitive for 1M+ cells.
+* 3C renders only the **visible** tiles and spreads readback over multiple frames using a **tile budget**.
+
+**Integrations**
+
+* **GPU (3A)**: `WebGpuStepper.readTile(x0,y0,w,h)` copies rows into a staging buffer and extracts the low bit.
+* **Workers (3B)**: expose a `CellSource` with a `Uint8Array` view; `readRect` slices directly from the buffer.
+
+**Tips**
+
+* Use tile sizes 32–128 depending on content and zoom. 64 is a good default.
+* When zoom ≥ 6, grid lines draw for orientation; they auto‑hide at lower zooms.
+* You can raise the per‑frame **tile budget** while paused to refresh the viewport instantly.
+
+```
+```

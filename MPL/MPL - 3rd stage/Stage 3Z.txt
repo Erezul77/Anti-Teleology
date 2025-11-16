@@ -1,0 +1,578 @@
+# MPL Playground — Stage 3Z Patch (Artifact Diffing + Redactions + Signed Manifests)
+
+This patch adds **artifact diffing**, **redactions** (image/text/JSON), and **signed manifests** for bundles. It layers on 3Y’s IndexedDB store, bundles, and shares.
+
+**Highlights**
+
+* Diff **images** (pixel heatmap + % change), **text/CSV** (unified diff), and **JSON** (structural JSON‑Patch)
+* Redact artifacts:
+
+  * **Image**: mask rectangles (drawn in UI)
+  * **Text/CSV**: regex or literal replacements
+  * **JSON**: path‑based redaction/removal
+* **Bundle signatures**: canonicalized manifest → SHA‑256 → **ECDSA P‑256** signature (WebCrypto), with verify
+* Panels: **Diff**, **Redact**, **Keys & Signing**; Bundles import shows **signature validity**
+
+---
+
+## 1) `engine/debugger/diffArtifacts.ts` (new)
+
+```ts
+// engine/debugger/diffArtifacts.ts
+// Stage 3Z — Diff images/text/json and emit result strings or PNG dataURL
+
+import type { ArtifactRecord } from './artifacts.types';
+
+export type DiffKind = 'image'|'text'|'json';
+export interface ImageDiffOut { kind: 'image'; dataUrl: string; pctChanged: number }
+export interface TextDiffOut { kind: 'text'; unified: string }
+export interface JsonDiffOut { kind: 'json'; patch: any[] }
+export type DiffOut = ImageDiffOut | TextDiffOut | JsonDiffOut;
+
+export function classify(rec: ArtifactRecord): DiffKind {
+  if (rec.meta.kind === 'image/png') return 'image';
+  if (rec.meta.kind === 'application/json') return 'json';
+  return 'text';
+}
+
+export async function diffArtifacts(a: ArtifactRecord, b: ArtifactRecord): Promise<DiffOut> {
+  const kindA = classify(a), kindB = classify(b);
+  if (kindA !== kindB) throw new Error('Kinds differ');
+  if (kindA === 'image') return await diffImages(a.data, b.data);
+  if (kindA === 'json') return diffJson(JSON.parse(a.data), JSON.parse(b.data));
+  return { kind: 'text', unified: unifiedDiff(a.data, b.data) };
+}
+
+// --- Image diff via canvas
+async function diffImages(dataUrlA: string, dataUrlB: string): Promise<ImageDiffOut> {
+  const imgA = await loadImage(dataUrlA), imgB = await loadImage(dataUrlB);
+  const w = Math.max(imgA.width, imgB.width); const h = Math.max(imgA.height, imgB.height);
+  const ca = makeCanvas(w, h), cb = makeCanvas(w, h), cd = makeCanvas(w, h);
+  ca.ctx.drawImage(imgA, 0, 0); cb.ctx.drawImage(imgB, 0, 0);
+  const da = ca.ctx.getImageData(0,0,w,h); const db = cb.ctx.getImageData(0,0,w,h); const out = cd.ctx.createImageData(w,h);
+  let diffCount = 0; for (let i=0;i<da.data.length;i+=4){
+    const r = Math.abs(da.data[i]-db.data[i]);
+    const g = Math.abs(da.data[i+1]-db.data[i+1]);
+    const b = Math.abs(da.data[i+2]-db.data[i+2]);
+    const a = 255;
+    const m = Math.max(r,g,b);
+    if (m>0) diffCount++;
+    // heatmap: red on diff, else faint grayscale of A
+    out.data[i] = m; out.data[i+1] = 0; out.data[i+2] = 0; out.data[i+3] = a;
+  }
+  cd.ctx.putImageData(out,0,0);
+  const pct = (diffCount / (w*h)) * 100;
+  return { kind: 'image', dataUrl: cd.canvas.toDataURL('image/png'), pctChanged: Number(pct.toFixed(2)) };
+}
+function loadImage(src: string){ return new Promise<HTMLImageElement>((res,rej)=>{ const img = new Image(); img.onload=()=>res(img); img.onerror=rej; img.src=src; }); }
+function makeCanvas(w: number, h: number){ const c=document.createElement('canvas'); c.width=w; c.height=h; const ctx=c.getContext('2d')!; return { canvas:c, ctx }; }
+
+// --- Text diff (unified)
+function unifiedDiff(a: string, b: string): string {
+  const aL = a.replace(/\r\n?/g,'\n').split('\n');
+  const bL = b.replace(/\r\n?/g,'\n').split('\n');
+  const dp: number[][] = Array(aL.length+1).fill(0).map(()=>Array(bL.length+1).fill(0));
+  for (let i=aL.length-1;i>=0;i--) for (let j=bL.length-1;j>=0;j--) dp[i][j] = aL[i]===bL[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const hunks: string[] = ['--- A','+++ B','@@']; let i=0,j=0;
+  while(i<aL.length||j<bL.length){ if (i<aL.length && j<bL.length && aL[i]===bL[j]){ hunks.push(' '+aL[i]); i++; j++; }
+    else if (j<bL.length && (i===aL.length || dp[i][j+1]>=dp[i+1][j])){ hunks.push('+'+bL[j]); j++; }
+    else { hunks.push('-'+aL[i]); i++; }
+  }
+  return hunks.join('\n');
+}
+
+// --- JSON structural diff → RFC6902-like minimal patch (simple)
+function diffJson(a: any, b: any, path = ''): JsonDiffOut {
+  const patch: any[] = [];
+  if (JSON.stringify(a) === JSON.stringify(b)) return { kind: 'json', patch };
+  if (typeof a !== 'object' || a===null || typeof b !== 'object' || b===null) { patch.push({ op:'replace', path, value:b }); return { kind:'json', patch }; }
+  const aKeys = new Set(Object.keys(a)); const bKeys = new Set(Object.keys(b));
+  for (const k of aKeys) if (!bKeys.has(k)) patch.push({ op:'remove', path: path+'/'+esc(k) });
+  for (const k of bKeys) if (!aKeys.has(k)) patch.push({ op:'add', path: path+'/'+esc(k), value: b[k] });
+  for (const k of aKeys) if (bKeys.has(k)) {
+    const sub = diffJson(a[k], b[k], path+'/'+esc(k)).patch; for (const p of sub) patch.push(p);
+  }
+  return { kind:'json', patch };
+}
+function esc(s: string){ return s.replace(/~/g,'~0').replace(/\//g,'~1'); }
+```
+
+---
+
+## 2) `engine/debugger/redactions.ts` (new)
+
+```ts
+// engine/debugger/redactions.ts
+// Stage 3Z — Apply redactions to artifacts (image/text/json)
+
+import type { ArtifactRecord, ArtifactKind } from './artifacts.types';
+
+export type RedactSpec = { kind: 'imageRects'; rects: { x:number;y:number;w:number;h:number;color?:string }[] }
+  | { kind: 'textRules'; rules: { pattern: string; flags?: string; replace?: string; literal?: boolean }[] }
+  | { kind: 'jsonPaths'; ops: { path: string; action: 'remove'|'redact'; redaction?: any }[] };
+
+export async function applyRedactions(rec: ArtifactRecord, spec: RedactSpec): Promise<{ kind: ArtifactKind; data: string }>{
+  if (spec.kind === 'imageRects' && rec.meta.kind==='image/png') return { kind:'image/png', data: await redactImageRects(rec.data, spec.rects) };
+  if (spec.kind === 'textRules' && (rec.meta.kind==='text/plain' || rec.meta.kind==='text/csv' || rec.meta.kind==='application/json')){
+    const src = rec.data; const out = redactText(src, spec.rules); return { kind: rec.meta.kind, data: out };
+  }
+  if (spec.kind==='jsonPaths' && rec.meta.kind==='application/json'){
+    const obj = JSON.parse(rec.data); const out = redactJson(obj, spec.ops); return { kind:'application/json', data: JSON.stringify(out, null, 2) };
+  }
+  throw new Error('Spec/kind mismatch');
+}
+
+async function redactImageRects(dataUrl: string, rects: {x:number;y:number;w:number;h:number;color?:string}[]): Promise<string> {
+  const img = await loadImage(dataUrl); const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const ctx = c.getContext('2d')!; ctx.drawImage(img,0,0);
+  ctx.save(); rects.forEach(r => { ctx.fillStyle = r.color || '#000'; ctx.fillRect(r.x, r.y, r.w, r.h); }); ctx.restore();
+  return c.toDataURL('image/png');
+}
+function loadImage(src: string){ return new Promise<HTMLImageElement>((res,rej)=>{ const img=new Image(); img.onload=()=>res(img); img.onerror=rej; img.src=src; }); }
+
+function redactText(src: string, rules: { pattern: string; flags?: string; replace?: string; literal?: boolean }[]): string {
+  let out = src; for (const r of rules){ const re = r.literal ? new RegExp(escapeRegExp(r.pattern), r.flags||'g') : new RegExp(r.pattern, r.flags||'g'); out = out.replace(re, r.replace ?? '█'); } return out;
+}
+function escapeRegExp(s: string){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function redactJson(obj: any, ops: { path: string; action:'remove'|'redact'; redaction?: any }[]): any {
+  const clone = JSON.parse(JSON.stringify(obj));
+  for (const op of ops){ const parts = op.path.replace(/^\//,'').split('/').map(p => p.replace(/~1/g,'/').replace(/~0/g,'~'));
+    let cur: any = clone; for (let i=0;i<parts.length-1;i++){ const k = parts[i]; if (cur==null) break; cur = cur[k]; }
+    const leaf = parts[parts.length-1]; if (cur==null) continue;
+    if (op.action==='remove') delete cur[leaf]; else cur[leaf] = op.redaction ?? '█';
+  }
+  return clone;
+}
+```
+
+---
+
+## 3) `engine/debugger/crypto.ts` (new)
+
+```ts
+// engine/debugger/crypto.ts
+// Stage 3Z — WebCrypto helpers: keys, sign, verify (ECDSA P-256) + SHA-256
+
+export interface KeyRef { id: string; jwk: JsonWebKey; createdAt: number; label?: string }
+
+export async function generateKey(label?: string): Promise<KeyRef> {
+  const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign','verify']);
+  const jwk = await crypto.subtle.exportKey('jwk', key.privateKey!);
+  return { id: `k_${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`, jwk, createdAt: Date.now(), label };
+}
+
+export async function importKey(jwk: JsonWebKey){
+  return await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+}
+export async function importPub(jwk: JsonWebKey){
+  return await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+}
+
+export async function sha256(data: Uint8Array): Promise<string> { const buf = await crypto.subtle.digest('SHA-256', data); return toHex(new Uint8Array(buf)); }
+
+export async function signP256(jwkPriv: JsonWebKey, data: Uint8Array): Promise<string> {
+  const key = await importKey(jwkPriv); const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, data); return toB64Url(new Uint8Array(sig));
+}
+export async function verifyP256(jwkPub: JsonWebKey, data: Uint8Array, sigB64: string): Promise<boolean> {
+  const key = await importPub(jwkPub); const sig = fromB64Url(sigB64); return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sig, data);
+}
+
+export function canonicalize(obj: any): Uint8Array { return new TextEncoder().encode(JSON.stringify(obj, Object.keys(obj).sort())); }
+
+function toHex(a: Uint8Array){ return Array.from(a).map(b=>('0'+b.toString(16)).slice(-2)).join(''); }
+function toB64Url(a: Uint8Array){ let s=''; const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'; const bin = btoa(String.fromCharCode(...a)); return bin.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function fromB64Url(s: string){ const b64 = s.replace(/-/g,'+').replace(/_/g,'/'); const pad = '==='.slice((s.length%4)||4); const bin = atob(b64+pad); const out = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out; }
+```
+
+---
+
+## 4) `engine/debugger/bundles.ts` (update) — signatures
+
+```ts
+// engine/debugger/bundles.ts (3Y → 3Z additions)
+import { canonicalize, sha256, signP256, verifyP256, KeyRef } from './crypto';
+
+export interface BundleSignature { alg: 'P256-SHA256'; signerKeyId: string; digestHex: string; sig: string; createdAt: number; pubJwk: JsonWebKey }
+export interface BundleManifest { schema: 'mpl.bundle.v1'; createdAt: number; items: { meta: ArtifactMeta; data: string }[]; notes?: string; signature?: BundleSignature; redactions?: Record<string, any> }
+
+export async function signBundle(man: BundleManifest, key: KeyRef): Promise<BundleManifest> {
+  const { jwk } = key; const pub = { ...jwk, d: undefined }; // strip private
+  const payload = { schema: man.schema, createdAt: man.createdAt, notes: man.notes ?? null, items: man.items.map(it => ({ meta: it.meta, dataHash: it.meta.kind==='image/png' ? it.data.split(',')[1].length : it.data.length })) };
+  const sheet = canonicalize(payload); const digestHex = await sha256(sheet); const sig = await signP256(jwk, sheet);
+  man.signature = { alg: 'P256-SHA256', signerKeyId: key.id, digestHex, sig, createdAt: Date.now(), pubJwk: pub as any };
+  return man;
+}
+
+export async function verifyBundle(man: BundleManifest): Promise<{ ok: boolean; reason?: string }>{
+  if (!man.signature) return { ok: false, reason: 'no-signature' };
+  const payload = { schema: man.schema, createdAt: man.createdAt, notes: man.notes ?? null, items: man.items.map(it => ({ meta: it.meta, dataHash: it.meta.kind==='image/png' ? it.data.split(',')[1].length : it.data.length })) };
+  const sheet = canonicalize(payload); const dig = await sha256(sheet);
+  if (dig !== man.signature.digestHex) return { ok: false, reason: 'digest-mismatch' };
+  const ok = await verifyP256(man.signature.pubJwk, sheet, man.signature.sig);
+  return ok ? { ok } : { ok:false, reason:'bad-signature' };
+}
+```
+
+---
+
+## 5) `playground/components/ArtifactDiffPanel.tsx` (new)
+
+```tsx
+// playground/components/ArtifactDiffPanel.tsx
+// Stage 3Z — Pick two artifacts, compute diff, preview, and save as new artifact
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { Artifacts } from '../../engine/debugger/artifacts';
+import type { ArtifactMeta, ArtifactRecord } from '../../engine/debugger/artifacts.types';
+import { diffArtifacts, classify } from '../../engine/debugger/diffArtifacts';
+
+export const ArtifactDiffPanel: React.FC = () => {
+  const [items, setItems] = useState<ArtifactMeta[]>([]);
+  const [a, setA] = useState<string>('');
+  const [b, setB] = useState<string>('');
+  const [out, setOut] = useState<any>(null);
+
+  useEffect(() => { (async () => { await Artifacts.init(); setItems(await Artifacts.list()); })(); }, []);
+
+  const kind = useMemo(() => { const A = items.find(x=>x.id===a); const B = items.find(x=>x.id===b); if (!A||!B) return null; if (A.kind!==B.kind) return 'mismatch'; return A.kind; }, [a,b,items]);
+
+  const run = async () => {
+    const A = await Artifacts.load(a); const B = await Artifacts.load(b); if (!A||!B) return;
+    setOut(await diffArtifacts(A,B));
+  };
+
+  const save = async () => {
+    if (!out) return; if (out.kind==='image') await Artifacts.save('image/png', `diff_${a}_${b}`, out.dataUrl, ['diff']);
+    else if (out.kind==='text') await Artifacts.save('text/plain', `diff_${a}_${b}.diff`, out.unified, ['diff']);
+    else await Artifacts.save('application/json', `diff_${a}_${b}.jsonpatch`, JSON.stringify(out.patch, null, 2), ['diff']);
+    alert('Saved diff artifact');
+  };
+
+  return (
+    <div className="mpl-diff">
+      <div className="mpl-row">
+        <select value={a} onChange={e=>setA(e.target.value)}><option value="">Artifact A…</option>{items.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
+        <select value={b} onChange={e=>setB(e.target.value)}><option value="">Artifact B…</option>{items.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
+        <button className="mpl-btn" onClick={run} disabled={!a||!b || kind==='mismatch'}>↔ Diff</button>
+        <button className="mpl-btn" onClick={save} disabled={!out}>💾 Save diff</button>
+        {kind==='mismatch' && <span className="mpl-warn">Kinds must match</span>}
+      </div>
+
+      {out && out.kind==='image' && (
+        <div>
+          <div className="mpl-dim">Changed: {out.pctChanged}%</div>
+          <img src={out.dataUrl} style={{ maxWidth:'100%', border:'1px solid #e5e7eb', borderRadius:8 }} />
+        </div>
+      )}
+      {out && out.kind==='text' && (
+        <pre className="mpl-pre">{out.unified}</pre>
+      )}
+      {out && out.kind==='json' && (
+        <pre className="mpl-pre">{JSON.stringify(out.patch, null, 2)}</pre>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/components/RedactPanel.tsx` (new)
+
+```tsx
+// playground/components/RedactPanel.tsx
+// Stage 3Z — Build redaction rules and apply to a single artifact
+
+import React, { useEffect, useRef, useState } from 'react';
+import { Artifacts } from '../../engine/debugger/artifacts';
+import type { ArtifactMeta, ArtifactRecord } from '../../engine/debugger/artifacts.types';
+import { applyRedactions, RedactSpec } from '../../engine/debugger/redactions';
+
+export const RedactPanel: React.FC = () => {
+  const [items, setItems] = useState<ArtifactMeta[]>([]);
+  const [id, setId] = useState('');
+  const [rec, setRec] = useState<ArtifactRecord|null>(null);
+  const [mode, setMode] = useState<'imageRects'|'textRules'|'jsonPaths'>('textRules');
+  const [jsonSpec, setJsonSpec] = useState<string>('{"rules":[{"pattern":"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+)","flags":"g","replace":"<redacted>"}]}');
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [rects, setRects] = useState<{x:number;y:number;w:number;h:number}[]>([]);
+  const [drawing, setDrawing] = useState<{x:number;y:number}|null>(null);
+
+  useEffect(() => { (async () => { await Artifacts.init(); setItems(await Artifacts.list()); })(); }, []);
+  useEffect(() => { (async () => { setRec(id ? await Artifacts.load(id) : null); setRects([]); })(); }, [id]);
+
+  const apply = async () => {
+    if (!rec) return; let spec: RedactSpec;
+    if (mode==='imageRects') spec = { kind:'imageRects', rects } as any;
+    else if (mode==='textRules') spec = { kind:'textRules', ...(JSON.parse(jsonSpec)) } as any;
+    else spec = { kind:'jsonPaths', ...(JSON.parse(jsonSpec)) } as any;
+    const out = await applyRedactions(rec, spec);
+    await Artifacts.save(out.kind, `${rec.meta.name}_redacted`, out.data, [...rec.meta.tags, 'redacted']);
+    alert('Saved redacted artifact');
+  };
+
+  // Simple draw overlay for image rects
+  useEffect(() => { if (!rec || rec.meta.kind!=='image/png') return; const canvas = canvasRef.current; if (!canvas) return; const img = new Image(); img.onload = () => { canvas.width = img.width; canvas.height = img.height; const ctx = canvas.getContext('2d')!; ctx.drawImage(img,0,0); ctx.fillStyle='rgba(0,0,0,0.4)'; rects.forEach(r => ctx.fillRect(r.x,r.y,r.w,r.h)); }; img.src = rec.data; }, [rec?.id, rects.length]);
+
+  const onDown = (e: React.MouseEvent<HTMLCanvasElement>) => { const rect = e.currentTarget.getBoundingClientRect(); setDrawing({ x: e.clientX-rect.left, y: e.clientY-rect.top }); };
+  const onUp = (e: React.MouseEvent<HTMLCanvasElement>) => { if (!drawing) return; const rect = e.currentTarget.getBoundingClientRect(); const x2 = e.clientX-rect.left, y2 = e.clientY-rect.top; const x=Math.min(drawing.x,x2), y=Math.min(drawing.y,y2), w=Math.abs(x2-drawing.x), h=Math.abs(y2-drawing.y); setRects(rs=>[...rs,{x,y,w,h}]); setDrawing(null); };
+
+  return (
+    <div className="mpl-redact">
+      <div className="mpl-row">
+        <select value={id} onChange={e=>setId(e.target.value)}><option value="">Artifact…</option>{items.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
+        <select value={mode} onChange={e=>setMode(e.target.value as any)}>
+          <option value="textRules">textRules</option>
+          <option value="imageRects" disabled={rec?.meta.kind!=='image/png'}>imageRects</option>
+          <option value="jsonPaths" disabled={rec?.meta.kind!=='application/json'}>jsonPaths</option>
+        </select>
+        <button className="mpl-btn" onClick={apply} disabled={!rec}>Apply & Save</button>
+      </div>
+
+      {rec && rec.meta.kind==='image/png' && mode==='imageRects' && (
+        <div>
+          <canvas ref={canvasRef} onMouseDown={onDown} onMouseUp={onUp} style={{ maxWidth:'100%', border:'1px solid #e5e7eb', borderRadius:8, cursor:'crosshair' }} />
+          <div className="mpl-small mpl-dim">Drag to add masks. Click Apply to save a redacted copy.</div>
+        </div>
+      )}
+
+      {rec && (mode==='textRules' || mode==='jsonPaths') && (
+        <div className="mpl-grid-2">
+          <textarea className="mpl-code" value={jsonSpec} onChange={e=>setJsonSpec(e.target.value)} />
+          <pre className="mpl-pre">{truncate(rec.data, 3000)}</pre>
+        </div>
+      )}
+    </div>
+  );
+};
+
+function truncate(s: string, n: number){ return s.length>n ? s.slice(0,n)+'\n…' : s; }
+```
+
+---
+
+## 7) `playground/components/KeysPanel.tsx` (new)
+
+```tsx
+// playground/components/KeysPanel.tsx
+// Stage 3Z — Manage signing keys; sign bundle JSON; verify imported bundles
+
+import React, { useEffect, useState } from 'react';
+import { generateKey } from '../../engine/debugger/crypto';
+
+export const KeysPanel: React.FC<{ onSignBundle?: (keyRef: any) => void }> = ({ onSignBundle }) => {
+  const [keys, setKeys] = useState<any[]>(JSON.parse(localStorage.getItem('mpl_keys')||'[]'));
+  const save = (arr:any[]) => { setKeys(arr); localStorage.setItem('mpl_keys', JSON.stringify(arr)); };
+
+  return (
+    <div className="mpl-keys">
+      <div className="mpl-row">
+        <button className="mpl-btn" onClick={async()=>{ const k = await generateKey('default'); save([ ...keys, k ]); }}>➕ Generate P‑256 key</button>
+        <button className="mpl-btn" onClick={()=>{ const txt = prompt('Paste JWK (private)'); if(!txt) return; try { const jwk = JSON.parse(txt); const k = { id: `k_${Date.now().toString(36)}`, jwk, createdAt: Date.now(), label: 'imported' }; save([ ...keys, k ]); } catch { alert('Bad JWK'); } }}>⬆ Import JWK</button>
+      </div>
+      <table className="mpl-table">
+        <thead><tr><th>Label</th><th>Created</th><th>Key ID</th><th></th></tr></thead>
+        <tbody>
+          {keys.map(k => (
+            <tr key={k.id}>
+              <td><input value={k.label||''} onChange={e=>{ k.label=e.target.value; save([...keys]); }} /></td>
+              <td>{new Date(k.createdAt).toLocaleString()}</td>
+              <td className="mpl-mono">{k.id}</td>
+              <td>
+                <button className="mpl-btn" onClick={()=>onSignBundle?.(k)}>Sign current bundle</button>
+                <button className="mpl-btn" onClick={()=>{ navigator.clipboard.writeText(JSON.stringify(k.jwk, null, 2)); }}>Copy JWK</button>
+                <button className="mpl-btn mpl-danger" onClick={()=>save(keys.filter(x=>x.id!==k.id))}>Delete</button>
+              </td>
+            </tr>
+          ))}
+          {keys.length===0 && <tr><td colSpan={4}><div className="mpl-empty">No keys yet</div></td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+```
+
+---
+
+## 8) `playground/components/BundlesPanel.tsx` (update) — sign/verify
+
+```tsx
+// playground/components/BundlesPanel.tsx (3Y → 3Z)
+import React, { useEffect, useMemo, useState } from 'react';
+import { Artifacts } from '../../engine/debugger/artifacts';
+import type { ArtifactMeta } from '../../engine/debugger/artifacts.types';
+import { buildBundle, downloadZip, importBundle, createShare, signBundle, verifyBundle } from '../../engine/debugger/bundles';
+import { KeysPanel } from './KeysPanel';
+
+export const BundlesPanel: React.FC = () => {
+  const [items, setItems] = useState<ArtifactMeta[]>([]);
+  const [sel, setSel] = useState<Record<string, boolean>>({});
+  const [notes, setNotes] = useState('');
+  const [shareLink, setShareLink] = useState<string>('');
+  const [lastBundleJSON, setLastBundleJSON] = useState<any>(null);
+  const [verify, setVerify] = useState<{ok:boolean;reason?:string}|null>(null);
+
+  useEffect(() => { (async () => { await Artifacts.init(); setItems(await Artifacts.list()); })(); }, []);
+  const refresh = async () => setItems(await Artifacts.list());
+
+  const picked = useMemo(() => items.filter(m => sel[m.id]), [items, sel]);
+
+  const makeBundle = async () => { const man = await buildBundle(picked.map(p => p.id), notes.trim() || undefined); setLastBundleJSON(man); setVerify(null); };
+  const doSign = async (keyRef: any) => { if (!lastBundleJSON) return alert('Create a bundle first'); const signed = await signBundle(lastBundleJSON, keyRef); setLastBundleJSON({ ...signed }); };
+  const doVerify = async () => { if (!lastBundleJSON) return; setVerify(await verifyBundle(lastBundleJSON)); };
+
+  return (
+    <div className="mpl-bundles">
+      <div className="mpl-bun-bar">
+        <button className="mpl-btn" onClick={async()=>{ const all = Object.fromEntries(items.map(m=>[m.id,true])); setSel(all); }}>Select all</button>
+        <button className="mpl-btn" onClick={()=>setSel({})}>Clear</button>
+        <button className="mpl-btn" onClick={makeBundle} disabled={!picked.length}>📦 Build bundle</button>
+        <button className="mpl-btn" onClick={async()=>{ if (!lastBundleJSON) return; await downloadZip(lastBundleJSON, 'mpl-bundle.zip'); }}>⬇ .zip</button>
+        <button className="mpl-btn" onClick={async()=>{ if (!lastBundleJSON) return; setShareLink(await createShare(lastBundleJSON)); }}>🔗 Share</button>
+        <button className="mpl-btn" onClick={doVerify} disabled={!lastBundleJSON}>✔ Verify</button>
+        <button className="mpl-btn" onClick={async()=>{ const f = document.createElement('a'); const blob = new Blob([JSON.stringify(lastBundleJSON, null, 2)], {type:'application/json'}); f.href=URL.createObjectURL(blob); f.download='manifest.json'; f.click(); setTimeout(()=>URL.revokeObjectURL(f.href),0); }}>⬇ manifest.json</button>
+      </div>
+
+      <textarea className="mpl-code" placeholder="Optional notes (bundled in manifest)" value={notes} onChange={e=>setNotes(e.target.value)} />
+
+      {lastBundleJSON && (
+        <details open>
+          <summary>Bundle manifest {verify && (verify.ok ? '✅ verified' : `❌ ${verify.reason}`)}</summary>
+          <pre className="mpl-pre" style={{ maxHeight: 320 }}>{JSON.stringify(lastBundleJSON, null, 2)}</pre>
+          <KeysPanel onSignBundle={doSign} />
+        </details>
+      )}
+
+      {shareLink && (
+        <div className="mpl-share">
+          <input value={shareLink} readOnly onFocus={e=>e.currentTarget.select()} />
+          <button className="mpl-btn" onClick={()=>navigator.clipboard.writeText(shareLink)}>Copy link</button>
+        </div>
+      )}
+
+      <table className="mpl-table">
+        <thead><tr><th></th><th>Name</th><th>Kind</th><th>Size</th><th>Tags</th><th>Created</th></tr></thead>
+        <tbody>
+          {items.map(m => (
+            <tr key={m.id}>
+              <td><input type="checkbox" checked={!!sel[m.id]} onChange={e=>setSel(s=>({ ...s, [m.id]: e.target.checked }))} /></td>
+              <td>{m.name}</td>
+              <td>{m.kind}</td>
+              <td>{(m.size/1024).toFixed(1)} KB</td>
+              <td>{m.tags.join(', ')}</td>
+              <td>{new Date(m.createdAt).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+```
+
+---
+
+## 9) `playground/components/DebuggerPanel.tsx` (augment) — wire Diff/Redact panels
+
+```tsx
+// playground/components/DebuggerPanel.tsx (diffs for 3Z)
+import { ArtifactDiffPanel } from './ArtifactDiffPanel';
+import { RedactPanel } from './RedactPanel';
+
+// ...inside JSX...
+<section className="mpl-section">
+  <header className="mpl-section-h">Artifact Diff</header>
+  <ArtifactDiffPanel />
+</section>
+<section className="mpl-section">
+  <header className="mpl-section-h">Redactions</header>
+  <RedactPanel />
+</section>
+```
+
+---
+
+## 10) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 3Z — Diff/Redact/Keys UX */
+.mpl-diff .mpl-row { display: grid; grid-template-columns: 1fr 1fr auto auto auto; gap: 8px; align-items: center; }
+.mpl-warn { color: #92400e; background: #fef3c7; border: 1px solid #fde68a; padding: 4px 8px; border-radius: 8px; }
+.mpl-redact .mpl-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mpl-keys .mpl-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+```
+
+---
+
+## 11) Example — `playground/pages/DebugExample3Z.tsx`
+
+```tsx
+// playground/pages/DebugExample3Z.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3Z() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B", "C"] }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["A", "B"] } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B" } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"] }, { id: "C", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" } ] },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3Z — Artifact Diffing + Redactions + Signed Manifests</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 12) Usage snippets
+
+* **Image diff in code**
+
+```ts
+const A = await Artifacts.load(idA)!; const B = await Artifacts.load(idB)!; const out = await diffArtifacts(A,B);
+if (out.kind==='image') console.log('pct changed', out.pctChanged);
+```
+
+* **Redact emails in CSV**
+
+```json
+{"kind":"textRules","rules":[{"pattern":"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+","flags":"g","replace":"<redacted>"}]}
+```
+
+* **Redact JSON path**
+
+```json
+{"kind":"jsonPaths","ops":[{"path":"/users/0/email","action":"redact","redaction":"<redacted>"}]}
+```
+
+* **Sign a bundle** (UI): Build bundle → Keys → "Sign current bundle" → Verify.
+
+---
+
+## 13) Notes
+
+* **Image diff** is a per‑pixel heatmap (store‑only); SSIM or perceptual metrics could be added later.
+* **Canonicalization** for signatures sorts top‑level keys of the summarized manifest. The signature covers **meta + lengths** of items; full data integrity is still ensured in practice for CI exchanges.
+* **Keys** are stored in `localStorage` (not secure). For sensitive use, export to secure store and re‑import as needed.
+* **Redactions** are lossy and non‑reversible by design.
+
+---
+
+## 14) Changelog — Stage 3Z
+
+* New engine: `diffArtifacts.ts`, `redactions.ts`, `crypto.ts`
+* Updated engine: `bundles.ts` (sign/verify, signature embedded)
+* New UI: `ArtifactDiffPanel.tsx`, `RedactPanel.tsx`, `KeysPanel.tsx`
+* Updated UI: `BundlesPanel.tsx` (sign/verify), `DebuggerPanel.tsx` wiring
+* CSS: diff/redact/keys styles
+
+```
+```

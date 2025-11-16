@@ -1,0 +1,369 @@
+# MPL Playground — Stage 4C Patch (Animated Edge Routing + Size/Label Lerp + Playhead Scrubber)
+
+This patch upgrades the 4B canvas renderer with:
+
+* **Animated edge routing** (straight/arc/quad) with curvature lerp.
+* **Lerped node sizes and label scales** across ticks.
+* A **Playhead Scrubber** with mini-heat timeline, keyboard nudge, and snap.
+
+No external deps. Pure browser.
+
+---
+
+## Highlights
+
+* Edge routing modes: `straight`, `arc` (circular), `quad` (quadratic Bézier). Curvature animates with tick interpolation.
+* Per-node **style map**: radius `r`, label alpha and scale; automatically derived from degree or rule heat, and lerped frame-to-frame.
+* **Scrubber**: range slider + tiny activity bars from rules fired. Supports ←/→, Shift for ×5, Home/End, click-to-seek.
+
+---
+
+## 1) `engine/renderer/style/nodeStyler.ts` (new)
+
+```ts
+// engine/renderer/style/nodeStyler.ts
+// Stage 4C — Compute per-node sizes and label scales; support lerp across ticks
+
+import type { SnapshotSlim } from "../../core/perf/timelineDelta";
+
+export interface NodeStyle { r: number; labelScale: number; labelAlpha: number }
+export type StyleMap = Record<string, NodeStyle>;
+
+export interface StyleParams {
+  baseR: number; maxR: number; // px
+  degreeBoost: number;         // influence of degree on size
+  hotRule?: string | null;     // if set, boost nodes touched by rule this tick
+}
+
+export const DefaultStyle: StyleParams = { baseR: 8, maxR: 18, degreeBoost: 0.6 };
+
+export function styleForSnapshot(s: SnapshotSlim, p: StyleParams = DefaultStyle): StyleMap {
+  const out: StyleMap = {};
+  const deg: Record<string, number> = {};
+  for (const id in s.monads){ deg[id] = (s.monads[id].neighbors || []).length; }
+  const maxDeg = Math.max(1, ...Object.values(deg), 1);
+
+  // mark hot nodes from rules
+  const hot: Record<string, number> = {};
+  for (const rf of s.rulesFired || []){
+    if (rf.monadId) hot[rf.monadId] = (hot[rf.monadId]||0) + 1;
+    if ((rf as any).sourceId) hot[(rf as any).sourceId] = (hot[(rf as any).sourceId]||0)+1;
+    if ((rf as any).targetId) hot[(rf as any).targetId] = (hot[(rf as any).targetId]||0)+1;
+  }
+
+  for (const id in s.monads){
+    const d = deg[id] || 0; const h = hot[id] || 0;
+    const k = Math.min(1, d / maxDeg);
+    const r = clamp(p.baseR + (p.maxR - p.baseR) * (p.degreeBoost * k + (1-p.degreeBoost) * (h>0?0.5:0)), p.baseR, p.maxR);
+    const labelScale = 0.9 + 0.6 * k; // 0.9..1.5
+    const labelAlpha = 0.6 + 0.4 * (h>0?1:0); // slightly brighter when hot
+    out[id] = { r, labelScale, labelAlpha };
+  }
+  return out;
+}
+
+export function lerpStyles(a: StyleMap, b: StyleMap, t: number): StyleMap {
+  const out: StyleMap = {}; const ids = new Set([...Object.keys(a), ...Object.keys(b)]);
+  ids.forEach(id => {
+    const A = a[id] || b[id]; const B = b[id] || a[id];
+    out[id] = { r: mix(A.r, B.r, t), labelScale: mix(A.labelScale, B.labelScale, t), labelAlpha: mix(A.labelAlpha, B.labelAlpha, t) };
+  });
+  return out;
+}
+
+function mix(a:number,b:number,t:number){ return a + (b-a) * Math.max(0, Math.min(1, t)); }
+function clamp(x:number, lo:number, hi:number){ return Math.max(lo, Math.min(hi, x)); }
+```
+
+---
+
+## 2) `engine/renderer/canvas/CanvasGraph.ts` (update) — edge routing + style overrides
+
+```ts
+// engine/renderer/canvas/CanvasGraph.ts — 4C additions
+// — Edge routing modes and curvature; node size + label overrides; public helpers
+
+// NEW types
+export type EdgeMode = 'straight'|'arc'|'quad';
+export interface StyleOverride { r?: number; labelScale?: number; labelAlpha?: number; alpha?: number; x?: number; y?: number }
+
+export class CanvasGraph {
+  // existing fields...
+  edgeMode: EdgeMode = 'arc';
+  curvature = 0.25;     // for arc/quad
+  externalPos: Record<string, { x:number; y:number; alpha:number }> | null = null;
+  prevPos: Record<string, { x:number; y:number; alpha:number }> | null = null;
+  externalStyle: Record<string, StyleOverride> | null = null; // NEW
+
+  setStyleOverrides(s: Record<string, StyleOverride> | null){ this.externalStyle = s; }
+  setEdgeMode(m: EdgeMode){ this.edgeMode = m; }
+  setCurvature(k: number){ this.curvature = k; }
+
+  getNodeRadius(id: string){
+    const ov = this.externalStyle?.[id];
+    if (ov?.r) return ov.r * this.cam.z;
+    return this.nodeRadius * this.cam.z;
+  }
+
+  draw(){
+    const s = this.last; if (!s) return; const ctx = this.ctx; const { width, height } = this.canvas; ctx.save();
+    ctx.fillStyle = this.theme.bg; ctx.fillRect(0,0,width,height); drawGrid(ctx, this.cam, width, height, this.theme.grid);
+    const P = this.externalPos;
+
+    // Edges — with routing
+    ctx.lineWidth = 1;
+    for (const id in s.monads){ const m = s.monads[id]; const nb = m.neighbors||[]; const a = P?.[id] || m; for (const t of nb){ const B = s.monads[t]; if (!B) continue; const b = P?.[t] || B; const A2 = worldToScreen(a as any, this.cam), B2 = worldToScreen(b as any, this.cam);
+        ctx.strokeStyle = this.theme.edge; if (this.hotRule && isEdgeHot(s, id, t, this.hotRule)) ctx.strokeStyle = this.theme.edgeHot; ctx.beginPath();
+        const alpha = (a as any).alpha * (b as any).alpha; ctx.globalAlpha = alpha;
+        routeEdge(ctx, A2.x, A2.y, B2.x, B2.y, this.edgeMode, this.curvature, id < t ? 1 : -1);
+        ctx.stroke(); ctx.globalAlpha = 1; }
+    }
+
+    // Nodes
+    for (const id in s.monads){ const m = s.monads[id]; const p = P?.[id] || m; const scr = worldToScreen(p as any, this.cam); const r = this.getNodeRadius(id);
+      ctx.beginPath(); ctx.arc(scr.x, scr.y, r, 0, Math.PI*2);
+      ctx.globalAlpha = (p as any).alpha ?? 1; ctx.fillStyle = this.sel===id ? this.theme.nodeSel : this.theme.node; ctx.fill(); ctx.globalAlpha = 1; }
+
+    // Labels
+    ctx.fillStyle = this.theme.label; ctx.textAlign='center'; ctx.textBaseline='top';
+    for (const id in s.monads){ const p = P?.[id] || s.monads[id]; const scr = worldToScreen(p as any, this.cam); const st = this.externalStyle?.[id]; const scale = st?.labelScale ?? 1; const alpha = (st?.labelAlpha ?? 1) * ((p as any).alpha ?? 1);
+      ctx.save(); ctx.globalAlpha = alpha; ctx.font = `${12*scale}px ui-monospace, monospace`; ctx.fillText(id, scr.x, scr.y + this.getNodeRadius(id) + 2); ctx.restore(); }
+
+    ctx.restore();
+  }
+}
+
+// Helpers
+export function routeEdge(ctx: CanvasRenderingContext2D, ax:number, ay:number, bx:number, by:number, mode: EdgeMode, k=0.25, dir=1){
+  if (mode==='straight'){ ctx.moveTo(ax,ay); ctx.lineTo(bx,by); return; }
+  const mx = (ax+bx)/2, my=(ay+by)/2; const dx = bx-ax, dy=by-ay; const len = Math.max(1, Math.hypot(dx,dy)); const nx = -dy/len, ny = dx/len; // normal
+  const c = k * len * dir;
+  if (mode==='arc'){
+    // approximate circular arc via quadratic with mid control point
+    const cx = mx + nx * c, cy = my + ny * c; ctx.moveTo(ax,ay); ctx.quadraticCurveTo(cx, cy, bx, by);
+  } else {
+    // quad with stronger offset at 1/3
+    const cx = ax + dx/3 + nx * c, cy = ay + dy/3 + ny * c; ctx.moveTo(ax,ay); ctx.quadraticCurveTo(cx, cy, bx, by);
+  }
+}
+```
+
+---
+
+## 3) `playground/components/GraphCanvas.tsx` (update) — feed style + curvature lerp
+
+```tsx
+// playground/components/GraphCanvas.tsx — 4C: style overrides + anim curvature
+import React, { useEffect, useRef, useState } from 'react';
+import { CanvasGraph } from '../../engine/renderer/canvas/CanvasGraph';
+import { SnapshotSlim } from '../../engine/core/perf/timelineDelta';
+import { ForceState, DefaultForce, ensureState, seedFromSnapshot, stepLayout, pinAt, unpin } from '../../engine/renderer/layout/force';
+import { lerpPositions, BlendPos } from '../../engine/renderer/anim/transition';
+import type { StyleMap } from '../../engine/renderer/style/nodeStyler';
+
+export const GraphCanvas: React.FC<{
+  snapshot: SnapshotSlim | null; hotRule?: string | null; onPick?: (id: string|null) => void;
+  physics?: boolean; physicsStrength?: number; blendT?: number; style?: StyleMap; prevStyle?: StyleMap; edgeMode?: 'straight'|'arc'|'quad'; curvA?: number; curvB?: number }
+> = ({ snapshot, hotRule=null, onPick, physics=true, physicsStrength=1, blendT=1, style, prevStyle, edgeMode='arc', curvA=0.12, curvB=0.28 }) => {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const graphRef = useRef<CanvasGraph | null>(null);
+  const [force] = useState<ForceState>({ pos: {} });
+  const [drag, setDrag] = useState<{ id: string; offX:number; offY:number }|null>(null);
+
+  // init
+  useEffect(() => { const c = ref.current!; const g = new CanvasGraph(c); g.setEdgeMode(edgeMode); graphRef.current = g; const ro = new ResizeObserver(()=>{ const r = c.getBoundingClientRect(); g.resize(r.width|0, r.height|0); g.draw(); }); ro.observe(c.parentElement!); return () => ro.disconnect(); }, []);
+
+  // snapshot
+  useEffect(() => { const g = graphRef.current; if (!g || !snapshot) return; ensureState(force, snapshot); if (!g.prevPos) seedFromSnapshot(force, snapshot); g.setSnapshot(snapshot as any); g.setHotRule(hotRule || null); g.setEdgeMode(edgeMode); g.draw(); }, [snapshot?.tick, hotRule, edgeMode]);
+
+  // RAF loop
+  useEffect(() => { let raf=0; const g = graphRef.current!; let last = performance.now(); function frame(ts:number){ const dt = Math.min(1/30, (ts-last)/1000); last = ts; if (physics && snapshot) stepLayout(force, snapshot, { ...DefaultForce, spring: DefaultForce.spring * physicsStrength, repulsion: DefaultForce.repulsion * physicsStrength }, dt*60);
+      const pos: Record<string, BlendPos> = {}; for (const id in force.pos) pos[id] = { x: force.pos[id].x, y: force.pos[id].y, alpha: 1 };
+      const t = Math.max(0, Math.min(1, blendT)); g.setExternalPositions(g.prevPos ? lerpPositions(g.prevPos as any, pos, t) : pos);
+      // curvature lerp
+      const curv = (1-t) * curvA + t * curvB; g.setCurvature(curv);
+      // style lerp
+      if (style){ const S = prevStyle ? (Object.keys(prevStyle).length?prevStyle:style) : style; const M: any = {}; for (const id in style){ const a = (S as any)[id] || style[id]; const b = style[id]; M[id] = { r: a.r + (b.r-a.r)*t, labelScale: a.labelScale + (b.labelScale-a.labelScale)*t, labelAlpha: a.labelAlpha + (b.labelAlpha-a.labelAlpha)*t }; }
+        g.setStyleOverrides(M); }
+      g.draw(); raf = requestAnimationFrame(frame); }
+    raf = requestAnimationFrame(frame); return () => cancelAnimationFrame(raf); }, [snapshot?.tick, physics, physicsStrength, blendT, style, prevStyle, curvA, curvB]);
+
+  // drag-pin
+  useEffect(() => { const c = ref.current!; const g = graphRef.current!; const md = (e:MouseEvent)=>{ const hit = g.hitNode(...relative(c,e)); if (!hit) return; const p = g.getScreenPos(hit); setDrag({ id: hit, offX: p.x - e.clientX, offY: p.y - e.clientY }); pinAt(force, hit, force.pos[hit]?.x||0, force.pos[hit]?.y||0); onPick?.(hit); };
+    const mm = (e:MouseEvent)=>{ if (!drag) return; const world = g.screenToWorld(e.clientX + drag.offX, e.clientY + drag.offY); pinAt(force, drag.id, world.x, world.y); };
+    const mu = ()=>setDrag(null); const dbl=(e:MouseEvent)=>{ const hit = g.hitNode(...relative(c,e)); if (hit) unpin(force, hit); };
+    c.addEventListener('mousedown', md); window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu); c.addEventListener('dblclick', dbl); return ()=>{ c.removeEventListener('mousedown', md); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); c.removeEventListener('dblclick', dbl); }; }, [snapshot?.tick, drag?.id]);
+
+  return <canvas ref={ref} style={{ width:'100%', height: 480, display:'block', border:'1px solid #e5e7eb', borderRadius: 10 }} />;
+};
+
+function relative(c: HTMLCanvasElement, e: MouseEvent){ const r = c.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top] as [number, number]; }
+```
+
+---
+
+## 4) `playground/components/PlayheadScrubber.tsx` (new)
+
+```tsx
+// playground/components/PlayheadScrubber.tsx
+// Stage 4C — Range slider + mini activity bars + keyboard control
+
+import React from 'react';
+
+export const PlayheadScrubber: React.FC<{
+  length: number; index: number; setIndex: (i:number)=>void;
+  activity?: number[]; // per-tick rule counts
+}>
+= ({ length, index, setIndex, activity }) => {
+  const bars = activity && activity.length===length ? activity : Array.from({length}, ()=>0);
+  const max = Math.max(1, ...bars);
+
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const mod = e.shiftKey ? 5 : 1; if (e.key==='ArrowRight'){ setIndex(Math.min(length-1, index + mod)); e.preventDefault(); }
+    else if (e.key==='ArrowLeft'){ setIndex(Math.max(0, index - mod)); e.preventDefault(); }
+    else if (e.key==='Home'){ setIndex(0); e.preventDefault(); }
+    else if (e.key==='End'){ setIndex(length-1); e.preventDefault(); }
+  };
+
+  return (
+    <div className="mpl-scrubber">
+      <div className="mpl-spark">
+        {bars.map((v,i) => <div key={i} className={`mpl-spark-bar ${i===index?'is-active':''}`} style={{ height: `${Math.round((v/max)*100)||2}%` }} />)}
+      </div>
+      <input className="mpl-range" type="range" min={0} max={Math.max(0,length-1)} value={index} onChange={e=>setIndex(parseInt(e.target.value)||0)} onKeyDown={onKey} />
+      <div className="mpl-scrubber-meta">{index+1}/{length}</div>
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/components/CanvasPanel.tsx` (update) — compute styles + wire scrubber
+
+```tsx
+// playground/components/CanvasPanel.tsx — 4C updates
+import React from 'react';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { GraphCanvas } from './GraphCanvas';
+import { CanvasPlaybackPanel } from './CanvasPlaybackPanel';
+import { PlayheadScrubber } from './PlayheadScrubber';
+import { styleForSnapshot, lerpStyles, DefaultStyle } from '../../engine/renderer/style/nodeStyler';
+import { ease } from '../../engine/renderer/anim/transition';
+
+export const CanvasPanel: React.FC<{ timeline: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void; hotRule?: string|null }>
+= ({ timeline, index, onIndex, hotRule=null }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(timeline[Math.max(0, Math.min(index, timeline.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, timeline]);
+
+  const [playing, setPlaying] = React.useState(false);
+  const [speed, setSpeed] = React.useState(1);
+  const [blendMs, setBlendMs] = React.useState(240);
+  const [phys, setPhys] = React.useState(1);
+  const [blendT, setBlendT] = React.useState(1);
+  const [edgeMode, setEdgeMode] = React.useState<'straight'|'arc'|'quad'>('arc');
+  const [curvA, setCurvA] = React.useState(0.10); const [curvB, setCurvB] = React.useState(0.28);
+
+  const lastIdx = React.useRef(index);
+  const animStart = React.useRef<number>(0);
+
+  // computed styles per snapshot + prev
+  const styleNow = React.useMemo(() => styleForSnapshot(slim, DefaultStyle), [slim.tick]);
+  const stylePrev = React.useMemo(() => {
+    const prevIdx = Math.max(0, Math.min(timeline.length-1, index-1));
+    const sPrev = ensurePositions(toSlim(timeline[prevIdx] || { tick: prevIdx, monads: [], rulesFired: [] } as any));
+    return styleForSnapshot(sPrev, DefaultStyle);
+  }, [index, timeline]);
+
+  // Playback
+  React.useEffect(() => { if (!playing) return; let raf = 0; function step(){ onIndex?.(i => Math.min(timeline.length-1, (typeof i==='number'?i:i)+Math.max(1, Math.round(speed))) as any); raf = requestAnimationFrame(step); } raf = requestAnimationFrame(step); return () => cancelAnimationFrame(raf); }, [playing, speed, timeline.length]);
+  React.useEffect(() => { if (index !== lastIdx.current){ animStart.current = performance.now(); lastIdx.current = index; setBlendT(0); } }, [index]);
+  React.useEffect(() => { if (blendMs<=0){ setBlendT(1); return; } let raf=0; function frame(){ const t = Math.min(1, (performance.now()-animStart.current)/Math.max(1, blendMs)); setBlendT(ease('easeOutCubic', t)); if (t<1) raf=requestAnimationFrame(frame); } raf=requestAnimationFrame(frame); return () => cancelAnimationFrame(raf); }, [index, blendMs]);
+
+  const activity = React.useMemo(() => timeline.map(s => (s.rulesFired||[]).length), [timeline]);
+
+  return (
+    <div className="mpl-canvas">
+      <CanvasPlaybackPanel playing={playing} onToggle={()=>setPlaying(p=>!p)} speed={speed} setSpeed={setSpeed} blendMs={blendMs} setBlendMs={setBlendMs} phys={phys} setPhys={setPhys} />
+      <div className="mpl-row">
+        <label>Edges
+          <select value={edgeMode} onChange={e=>setEdgeMode(e.target.value as any)}>
+            <option value="straight">straight</option>
+            <option value="arc">arc</option>
+            <option value="quad">quad</option>
+          </select>
+        </label>
+        <label>Curv A<input type="number" step={0.02} value={curvA} onChange={e=>setCurvA(parseFloat(e.target.value)||0} style={{ width: 80 }} /></label>
+        <label>Curv B<input type="number" step={0.02} value={curvB} onChange={e=>setCurvB(parseFloat(e.target.value)||0} style={{ width: 80 }} /></label>
+      </div>
+      <PlayheadScrubber length={timeline.length} index={index} setIndex={i=>onIndex?.(i)} activity={activity} />
+      <GraphCanvas snapshot={slim} hotRule={hotRule} physics={true} physicsStrength={phys} blendT={blendT} style={styleNow as any} prevStyle={stylePrev as any} edgeMode={edgeMode} curvA={curvA} curvB={curvB} />
+      <div className="mpl-small mpl-dim">Tick {slim.tick} • {Object.keys(slim.monads).length} monads</div>
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4C — Scrubber + spark bars */
+.mpl-scrubber { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.mpl-spark { height: 36px; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 1px; background: #f3f4f6; border-radius: 8px; padding: 4px; overflow: hidden; }
+.mpl-spark-bar { background: #d1d5db; align-self: end; border-radius: 2px; }
+.mpl-spark-bar.is-active { background: #6366f1; }
+.mpl-range { width: 100%; }
+.mpl-scrubber-meta { font-size: 12px; color: #6b7280; }
+```
+
+---
+
+## 7) Example — `playground/pages/DebugExample4C.tsx`
+
+```tsx
+// playground/pages/DebugExample4C.tsx
+import React, { useMemo, useState } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample4C() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"], x: -80, y: 0 }, { id: "B", neighbors: ["A"], x: 80, y: 0 } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A", sourceId: "A", targetId: "B" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B","C"], x: -100, y: -20 }, { id: "B", neighbors: ["A","C"], x: 100, y: -20 }, { id: "C", neighbors: ["A","B"], x: 0, y: 110 } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B", sourceId: "B", targetId: "C" } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"], x: -60, y: 0 }, { id: "C", neighbors: ["A"], x: 60, y: 0 } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" } ] },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4C — Animated Edge Routing + Size/Label Lerp + Playhead Scrubber</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 8) Notes
+
+* **Curvature lerp:** `curvA` (previous tick) → `curvB` (current tick) blended by tick interpolation `blendT`. Adjust to taste in CanvasPanel controls.
+* **Style lerp:** uses degree & rule touches to compute sizes and label scales per tick, then lerps. You can plug your own style function while keeping the `StyleMap` shape.
+* **Scrubber:** keyboard: ←/→ (±1), Shift+←/→ (±5), Home/End. Activity bars show relative rule counts per tick.
+* **Edge directionality:** if needed, render arrowheads by drawing a small triangle along the routed edge near `B`.
+
+---
+
+## 9) Changelog — Stage 4C
+
+* New: `nodeStyler.ts` (per-node size/label computation)
+* Updated: `CanvasGraph.ts` (edge modes + style overrides)
+* Updated: `GraphCanvas.tsx` (curvature lerp + style feed)
+* New: `PlayheadScrubber.tsx`
+* Updated: `CanvasPanel.tsx` (controls + scrubber + style pipeline)
+* CSS: scrubber styles
+
+```
+```
