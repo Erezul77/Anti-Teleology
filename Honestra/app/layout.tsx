@@ -1,9 +1,10 @@
-import type { Metadata } from 'next'
+import type { Metadata } from "next";
+import "./globals.css";
 
 export const metadata: Metadata = {
-  title: 'Honestra - Teleology Integrity',
-  description: 'Detecting and moderating manipulative teleological framing',
-}
+  title: "Honestra Teleology Firewall",
+  description: "Teleology Integrity demo powered by a shared teleology engine.",
+};
 
 export default function RootLayout({
   children,
