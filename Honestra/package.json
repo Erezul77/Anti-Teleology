@@ -1,5 +1,5 @@
 {
-  "name": "honestra-teleology",
+  "name": "honestra",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,21 +9,17 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "14.0.0",
-    "react": "^18",
-    "react-dom": "^18",
+    "next": "14.2.3",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
     "openai": "^4.20.0"
   },
   "devDependencies": {
-    "typescript": "^5",
-    "@types/node": "^20.19.9",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "eslint": "^8",
-    "eslint-config-next": "14.0.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "@types/node": "20.11.30",
+    "@types/react": "18.2.62",
+    "@types/react-dom": "18.2.18",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.3",
+    "typescript": "5.4.5"
   }
 }
-

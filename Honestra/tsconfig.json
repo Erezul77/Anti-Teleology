@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "esnext",
+    "target": "ES2017",
     "lib": [
       "dom",
       "dom.iterable",
@@ -9,23 +9,20 @@
     "allowJs": false,
     "skipLibCheck": true,
     "strict": true,
-    "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
     "baseUrl": ".",
     "paths": {
-      "@shared/*": ["../src/*"],
-      "openai": ["./node_modules/openai"]
+      "openai": [
+        "./node_modules/openai"
+      ]
     },
-    "types": [
-      "node"
-    ],
     "plugins": [
       {
         "name": "next"

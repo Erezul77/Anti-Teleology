@@ -2,21 +2,41 @@
   color-scheme: light dark;
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
+  padding: 1.5rem;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  padding: 1.5rem;
-  max-width: 800px;
+  max-width: 860px;
   margin-inline: auto;
+  line-height: 1.5;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+h1 {
+  font-size: 1.8rem;
+  margin: 0;
 }
 
 textarea {
   width: 100%;
-  min-height: 150px;
+  min-height: 160px;
   padding: 0.75rem;
   font-family: inherit;
   font-size: 1rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
 }
 
 button {
@@ -27,3 +47,8 @@ button {
   font-size: 0.95rem;
 }
 
+section {
+  border-radius: 12px;
+  border: 1px solid #3333;
+  padding: 1rem;
+}

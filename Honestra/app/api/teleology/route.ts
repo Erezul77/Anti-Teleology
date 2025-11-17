@@ -13,9 +13,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // We treat analyzeTeleology as a black box; whatever it returns
-    // we send back as JSON.
-    const analysis: any = await (analyzeTeleology as any)(text);
+    const analysis = await analyzeTeleology(text);
 
     return NextResponse.json(analysis);
   } catch (err) {
