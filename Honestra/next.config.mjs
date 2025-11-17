@@ -15,6 +15,11 @@ const nextConfig = {
       ...(config.resolve.modules || []),
       path.resolve(__dirname, "node_modules"),
     ];
+    // Add path alias for lib folder
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "@": path.resolve(__dirname),
+    };
     return config;
   },
 };
