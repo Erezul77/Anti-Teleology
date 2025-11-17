@@ -3,10 +3,10 @@
 import { useState } from "react";
 
 type TeleologyResult = {
-  teleologyScore: number;
-  teleologyType: string | null;
-  manipulationRisk: string;
-  detectedPhrases: string[];
+  teleologyScore?: number;
+  teleologyType?: string | null;
+  manipulationRisk?: string;
+  detectedPhrases?: string[];
   purposeClaim?: string | null;
   neutralCausalParaphrase?: string | null;
   error?: string;
@@ -41,7 +41,7 @@ export default function TeleologyDemoPage() {
 
       setResult(data);
     } catch (err: any) {
-      console.error("[teleology-demo] error", err);
+      console.error("[Honestra][teleology-demo] error", err);
       setError("Unexpected error while calling the API");
     } finally {
       setLoading(false);
@@ -52,13 +52,20 @@ export default function TeleologyDemoPage() {
     <main>
       <h1>Honestra – Teleology Integrity Demo</h1>
       <p>
-        Paste any sentence, headline or statement below. We&apos;ll analyze how
+        Paste any sentence, headline, or statement below. We&apos;ll analyze how
         teleological (purpose-driven) it is and expose the causal structure.
       </p>
 
-      <label style={{ display: "block", marginTop: "1rem", marginBottom: "0.5rem" }}>
+      <label
+        style={{
+          display: "block",
+          marginTop: "1rem",
+          marginBottom: "0.5rem",
+        }}
+      >
         Text to analyze:
       </label>
+
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -83,7 +90,9 @@ export default function TeleologyDemoPage() {
           <ul>
             <li>
               <strong>Teleology score:</strong>{" "}
-              {result.teleologyScore.toFixed(2)}
+              {result.teleologyScore !== undefined
+                ? result.teleologyScore.toFixed(2)
+                : "n/a"}
             </li>
             <li>
               <strong>Teleology type:</strong>{" "}
@@ -91,11 +100,11 @@ export default function TeleologyDemoPage() {
             </li>
             <li>
               <strong>Manipulation risk:</strong>{" "}
-              {result.manipulationRisk}
+              {result.manipulationRisk ?? "n/a"}
             </li>
             <li>
               <strong>Detected phrases:</strong>{" "}
-              {result.detectedPhrases.length > 0
+              {result.detectedPhrases && result.detectedPhrases.length > 0
                 ? result.detectedPhrases.join(", ")
                 : "none"}
             </li>
