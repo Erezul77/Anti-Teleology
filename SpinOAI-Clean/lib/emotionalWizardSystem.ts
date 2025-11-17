@@ -14,6 +14,15 @@ interface WizardRequest {
   teleologyAnalysis?: TeleologyAnalysis
 }
 
+export interface TeleologyViewModel {
+  teleologyScore: number
+  teleologyType: string | null
+  manipulationRisk: string
+  detectedPhrases: string[]
+  purposeClaim: string | null
+  neutralCausalParaphrase: string | null
+}
+
 interface WizardResponse {
   response: string
   confidence: number
@@ -23,6 +32,7 @@ interface WizardResponse {
   manipulationEffect?: any
   memoryUpdate?: any
   systemSummary: string
+  teleology?: TeleologyViewModel | null
 }
 
 interface WizardConfig {
@@ -230,6 +240,16 @@ export class EmotionalWizardSystem {
       const processingTime = Date.now() - startTime
       console.log(`🧙‍♂️ Emotional Wizard System completed in ${processingTime}ms`)
 
+      // Map teleology analysis to view model
+      const teleologyViewModel: TeleologyViewModel = {
+        teleologyScore: teleologyAnalysis.teleologyScore,
+        teleologyType: teleologyAnalysis.teleologyType,
+        manipulationRisk: teleologyAnalysis.manipulationRisk,
+        detectedPhrases: teleologyAnalysis.detectedPhrases,
+        purposeClaim: teleologyAnalysis.purposeClaim,
+        neutralCausalParaphrase: teleologyAnalysis.neutralCausalParaphrase
+      }
+
       return {
         response: finalResponse,
         confidence: generationResponse?.confidence || 0.6,
@@ -242,7 +262,8 @@ export class EmotionalWizardSystem {
           userId,
           messageCount: this.memorySystem.getConversationHistory(sessionId, userId).length
         },
-        systemSummary
+        systemSummary,
+        teleology: teleologyViewModel
       }
 
     } catch (error) {
@@ -334,7 +355,8 @@ export class EmotionalWizardSystem {
 - Context Building: error
 - Language Generation: error
 - Quality Control: error
-- Manipulation Effect: none`
+- Manipulation Effect: none`,
+      teleology: null
     }
   }
 

@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Send, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Activity, TrendingUp, Brain, Zap, Target, Lightbulb, Layers, Heart, Sparkles } from 'lucide-react'
 import Image from 'next/image'
+import TeleologyPanel from './TeleologyPanel'
 
 interface UnifiedMessage {
   role: 'user' | 'assistant'
@@ -42,6 +43,14 @@ interface UnifiedMessage {
   causalChain?: string[]
   detailedAnalysis?: string
   realTimeAnalysis?: any
+  teleology?: {
+    teleologyScore: number
+    teleologyType: string | null
+    manipulationRisk: string
+    detectedPhrases: string[]
+    purposeClaim: string | null
+    neutralCausalParaphrase: string | null
+  } | null
 }
 
 interface UnifiedChatBoxProps {
@@ -345,7 +354,8 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
           onionLayer: data.onionLayer,
           causalChain: data.causalChain,
           detailedAnalysis: data.detailedAnalysis,
-          realTimeAnalysis: data.realTimeAnalysis
+          realTimeAnalysis: data.realTimeAnalysis,
+          teleology: data.teleology ?? null
         }
         console.log('✅ Assistant message created:', assistantMessage)
         const updatedMessages = [...newMessages, assistantMessage]
@@ -439,7 +449,10 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                         </button>
                         
                         {showTechnicalDetails && (
-                          <UnifiedRealTimeDashboard message={message} />
+                          <div className="mt-3 space-y-3">
+                            <UnifiedRealTimeDashboard message={message} />
+                            <TeleologyPanel teleology={message.teleology ?? null} darkMode={darkMode} />
+                          </div>
                         )}
                       </div>
                     )}

@@ -115,7 +115,8 @@ export async function POST(request: NextRequest) {
       },
       manipulationEffect: wizardResponse.manipulationEffect,
       memoryUpdate: wizardResponse.memoryUpdate,
-      systemSummary: wizardResponse.systemSummary
+      systemSummary: wizardResponse.systemSummary,
+      teleology: wizardResponse.teleology ?? null // Include teleology analysis
     }
 
     console.log('✅ Emotional Wizard System response generated successfully')
