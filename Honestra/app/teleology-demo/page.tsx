@@ -26,13 +26,16 @@ export default function TeleologyDemoPage() {
     setResult(null);
 
     try {
+      console.log("[Honestra][teleology-demo] Sending request with text:", text);
       const res = await fetch("/api/teleology", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
 
+      console.log("[Honestra][teleology-demo] Response status:", res.status);
       const data = await res.json();
+      console.log("[Honestra][teleology-demo] Response data:", data);
 
       if (!res.ok) {
         setError(data?.error || "Request failed");
