@@ -148,6 +148,8 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     "in order to",
     "so that",
     "meant to",
+    "trying to",
+    "supposed to",
     "punishment",
     "deserves",
     "deserve",
@@ -156,7 +158,12 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     "chosen",
     "god wants",
     "history wants",
-    "the universe wants"
+    "the universe wants",
+    "the world is",
+    "the world wants",
+    "teaching me",
+    "showing me",
+    "telling me"
   ];
 
   const detected: string[] = teleologyKeywords.filter((k) => lower.includes(k));

@@ -35,7 +35,7 @@ export default function TeleologyDemoPage() {
 
       console.log("[Honestra][teleology-demo] Response status:", res.status);
       const data = await res.json();
-      console.log("[Honestra][teleology-demo] Response data:", data);
+      console.log("[Honestra][teleology-demo] Response data:", JSON.stringify(data, null, 2));
 
       if (!res.ok) {
         setError(data?.error || "Request failed");
