@@ -1,105 +1,118 @@
 "use client";
 
-import React, { useState } from "react";
+import { useState } from "react";
 
-interface TeleologyAnalysis {
+type TeleologyResult = {
   teleologyScore: number;
   teleologyType: string | null;
   manipulationRisk: string;
   detectedPhrases: string[];
-  purposeClaim: string | null;
-  neutralCausalParaphrase: string | null;
-}
+  purposeClaim?: string | null;
+  neutralCausalParaphrase?: string | null;
+  error?: string;
+};
 
 export default function TeleologyDemoPage() {
   const [text, setText] = useState("");
+  const [result, setResult] = useState<TeleologyResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [analysis, setAnalysis] = useState<TeleologyAnalysis | null>(null);
 
-  const handleAnalyze = async () => {
+  async function handleAnalyze() {
     setLoading(true);
     setError(null);
-    setAnalysis(null);
-    
+    setResult(null);
+
     try {
       const res = await fetch("/api/teleology", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({ text }),
       });
 
+      const data = await res.json();
+
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to analyze teleology");
+        setError(data?.error || "Request failed");
+        return;
       }
 
-      const data = await res.json();
-      setAnalysis(data.analysis);
+      setResult(data);
     } catch (err: any) {
-      setError(err.message || "Unknown error");
+      console.error("[teleology-demo] error", err);
+      setError("Unexpected error while calling the API");
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   return (
-    <main className="max-w-2xl mx-auto py-10 px-4 space-y-6">
-      <h1 className="text-2xl font-bold">Honestra Teleology Demo</h1>
-      <p className="text-sm text-gray-600">
-        Paste any text (post, headline, thought) and see how teleological it is: purpose language,
-        type, and risk. This uses the shared teleologyEngine.
+    <main>
+      <h1>Honestra – Teleology Integrity Demo</h1>
+      <p>
+        Paste any sentence, headline or statement below. We&apos;ll analyze how
+        teleological (purpose-driven) it is and expose the causal structure.
       </p>
 
+      <label style={{ display: "block", marginTop: "1rem", marginBottom: "0.5rem" }}>
+        Text to analyze:
+      </label>
       <textarea
-        className="w-full border rounded p-2 min-h-[160px]"
-        placeholder="Paste some text that explains why something happened..."
         value={text}
         onChange={(e) => setText(e.target.value)}
+        placeholder='e.g. "This war is happening so that our nation will be purified."'
       />
 
-      <button
-        onClick={handleAnalyze}
-        disabled={loading || !text.trim()}
-        className="px-4 py-2 rounded border text-sm disabled:opacity-50"
-      >
-        {loading ? "Analyzing..." : "Analyze teleology"}
-      </button>
+      <div style={{ marginTop: "0.75rem" }}>
+        <button onClick={handleAnalyze} disabled={loading || !text.trim()}>
+          {loading ? "Analyzing..." : "Analyze teleology"}
+        </button>
+      </div>
 
-      {error && <p className="text-sm text-red-600">Error: {error}</p>}
+      {error && (
+        <p style={{ marginTop: "1rem", color: "red" }}>
+          Error: {error}
+        </p>
+      )}
 
-      {analysis && (
-        <section className="border rounded p-4 space-y-2">
-          <h2 className="font-semibold text-lg">Analysis</h2>
+      {result && !error && (
+        <section style={{ marginTop: "1.5rem" }}>
+          <h2>Analysis</h2>
+          <ul>
+            <li>
+              <strong>Teleology score:</strong>{" "}
+              {result.teleologyScore.toFixed(2)}
+            </li>
+            <li>
+              <strong>Teleology type:</strong>{" "}
+              {result.teleologyType ?? "none"}
+            </li>
+            <li>
+              <strong>Manipulation risk:</strong>{" "}
+              {result.manipulationRisk}
+            </li>
+            <li>
+              <strong>Detected phrases:</strong>{" "}
+              {result.detectedPhrases.length > 0
+                ? result.detectedPhrases.join(", ")
+                : "none"}
+            </li>
+          </ul>
+
+          <h3>LLM summaries</h3>
           <p>
-            <strong>Teleology score:</strong> {analysis.teleologyScore.toFixed(2)}
+            <strong>Purpose claim:</strong>{" "}
+            {result.purposeClaim ?? "no clear teleological story extracted"}
           </p>
           <p>
-            <strong>Teleology type:</strong> {analysis.teleologyType ?? "none"}
+            <strong>Neutral causal paraphrase:</strong>{" "}
+            {result.neutralCausalParaphrase ??
+              "no causal paraphrase generated"}
           </p>
-          <p>
-            <strong>Manipulation risk:</strong> {analysis.manipulationRisk}
-          </p>
-          <p>
-            <strong>Detected phrases:</strong>{" "}
-            {analysis.detectedPhrases.length > 0
-              ? analysis.detectedPhrases.join(", ")
-              : "none"}
-          </p>
-          {analysis.purposeClaim && (
-            <p>
-              <strong>Purpose claim (if implemented):</strong> {analysis.purposeClaim}
-            </p>
-          )}
-          {analysis.neutralCausalParaphrase && (
-            <p>
-              <strong>Causal paraphrase (if implemented):</strong>{" "}
-              {analysis.neutralCausalParaphrase}
-            </p>
-          )}
         </section>
       )}
     </main>
   );
 }
-

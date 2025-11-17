@@ -43,6 +43,15 @@ async function generateTeleologySummaries(input: string): Promise<{
     return { purposeClaim: null, neutralCausalParaphrase: null };
   }
 
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // No LLM available – fall back to heuristics only
+    return {
+      purposeClaim: null,
+      neutralCausalParaphrase: null,
+    };
+  }
+
   try {
     const prompt = `
 You are an assistant that analyzes teleological (purpose-based) language.
@@ -108,9 +117,12 @@ If there is no teleological story, set "purposeClaim" to an empty string.
         : null;
 
     return { purposeClaim, neutralCausalParaphrase };
-  } catch (error) {
-    console.error("generateTeleologySummaries error:", error);
-    return { purposeClaim: null, neutralCausalParaphrase: null };
+  } catch (err) {
+    console.error("[teleologyEngine] LLM summaries failed", err);
+    return {
+      purposeClaim: null,
+      neutralCausalParaphrase: null,
+    };
   }
 }
 

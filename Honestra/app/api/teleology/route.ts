@@ -1,20 +1,25 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { analyzeTeleology } from "@shared/lib/teleologyEngine";
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { text } = await req.json();
-    
-    if (typeof text !== "string" || !text.trim()) {
-      return NextResponse.json({ error: "Missing or invalid 'text' field" }, { status: 400 });
+    const body = await req.json();
+    const text = body?.text;
+
+    if (!text || typeof text !== "string") {
+      return NextResponse.json(
+        { error: "Missing 'text' field in request body" },
+        { status: 400 }
+      );
     }
 
     const analysis = await analyzeTeleology(text);
-    
-    return NextResponse.json({ analysis });
-  } catch (error) {
-    console.error("Teleology analysis error:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    return NextResponse.json(analysis);
+  } catch (err) {
+    console.error("[teleology-api] error", err);
+    return NextResponse.json(
+      { error: "Internal error while analyzing teleology" },
+      { status: 500 }
+    );
   }
 }
-
