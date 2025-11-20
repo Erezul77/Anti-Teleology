@@ -58,7 +58,7 @@ interface UnifiedChatBoxProps {
   setMessages: React.Dispatch<React.SetStateAction<UnifiedMessage[]>>
   darkMode: boolean
   language?: string
-  sessionMode?: 'therapy' | 'philosophical'
+  sessionMode?: 'coaching'
 }
 
 // Enhanced Real-time Dashboard Component
@@ -195,7 +195,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
   )
 }
 
-export function UnifiedChatBox({ messages, setMessages, darkMode, language: externalLanguage, sessionMode = 'therapy' }: UnifiedChatBoxProps) {
+export function UnifiedChatBox({ messages, setMessages, darkMode, language: externalLanguage, sessionMode = 'coaching' }: UnifiedChatBoxProps) {
   const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [expandedAnalysisMessages, setExpandedAnalysisMessages] = useState<Set<number>>(new Set())
@@ -509,10 +509,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
               onKeyPress={handleKeyPress}
-              placeholder={sessionMode === 'therapy' 
-                ? "Share your emotions, challenges, or what's on your mind..." 
-                : "Share your philosophical thoughts, questions, or reflections..."
-              }
+              placeholder="Share your emotions, challenges, or what's on your mind..."
               className={`w-full p-3 sm:p-4 rounded-xl resize-none ${
                 darkMode 
                   ? 'bg-gray-800 border-gray-600 text-white placeholder-gray-400' 

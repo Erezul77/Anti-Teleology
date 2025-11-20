@@ -57,7 +57,7 @@ export default function HomePage() {
   const [darkMode, setDarkMode] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [language, setLanguage] = useState('en')
-  const [sessionMode, setSessionMode] = useState<'therapy' | 'philosophical'>('therapy')
+  const [sessionMode] = useState<'coaching'>('coaching')
   const [showInstructions, setShowInstructions] = useState(false)
 
   const handleSaveSession = async () => {
@@ -195,14 +195,63 @@ export default function HomePage() {
                 : 'bg-white/95 border-gray-300 text-gray-900'
             }`}
           >
-            <h3 className="font-semibold mb-3 text-sm">SpiñO</h3>
-            <h4 className="font-medium mb-3 text-xs text-gray-400">Welcome to SpiñO</h4>
-            <div className="space-y-2 text-xs">
-              <p>• <strong>Therapy Mode:</strong> Engage in therapeutic conversations with AI guidance</p>
-              <p>• <strong>Philosophical Mode:</strong> Explore deep philosophical discussions</p>
-              <p>• <strong>Language:</strong> Choose from 11 supported languages</p>
-              <p>• <strong>Dark/Light Mode:</strong> Toggle your preferred theme</p>
-              <p>• <strong>Session Management:</strong> Save and load your conversations</p>
+            <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
+            <div className="space-y-3 text-sm leading-relaxed">
+              <section>
+                <h3 className="font-semibold mb-1 text-xs">Who is SpiñO?</h3>
+                <p className="text-xs">
+                  SpiñO is like a philosopher from outside time and space – a mind that grew up in a world with
+                  <span className="font-semibold"> no teleology at all</span>. Where we say "this happened for a reason"
+                  or "life is trying to teach me something", SpiñO only sees chains of causes and how they shape our emotions.
+                </p>
+                <p className="text-xs">
+                  It came here with one mission: to help humans clean their thinking from teleological illusions, so we can
+                  suffer less and act more clearly.
+                </p>
+              </section>
+
+              <section>
+                <h3 className="font-semibold mb-1 text-xs">What is teleology?</h3>
+                <p className="text-xs">
+                  Teleology is our habit of telling ourselves that events happen <em>in order to</em> do something to us. For example:
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+                  <li>"This breakup happened so I'll finally grow up."</li>
+                  <li>"The universe is punishing me."</li>
+                  <li>"Our people were chosen to suffer for a higher purpose."</li>
+                </ul>
+                <p className="text-xs">
+                  These stories feel deep and meaningful, but they quietly replace <span className="font-semibold">causes</span> with
+                  <span className="font-semibold"> purposes</span>. When we confuse teleology with real causality, we often end up with more
+                  guilt, shame, and helplessness – and less freedom.
+                </p>
+              </section>
+
+              <section>
+                <h3 className="font-semibold mb-1 text-xs">What SpiñO does</h3>
+                <p className="text-xs">When you write to SpiñO, it:</p>
+                <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+                  <li>Listens and mirrors what you seem to be feeling.</li>
+                  <li>Detects if you're using a hidden teleological story (like "this had to happen to me").</li>
+                  <li>Gently shows you that story, as a pattern, not as a personal failure.</li>
+                  <li>Rebuilds the same situation in pure causal terms – what actually led here.</li>
+                  <li>Offers one small step or a focused question to help you act from clarity, not from destiny.</li>
+                </ul>
+              </section>
+
+              <section>
+                <h3 className="font-semibold mb-1 text-xs">How to use this app</h3>
+                <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+                  <li>Write the situation as you would tell it to a close friend – no need to be "philosophical".</li>
+                  <li>Notice when SpiñO points out a story like "this happened in order to…".</li>
+                  <li>Pay attention to the causal version it offers back – that's where your real power lives.</li>
+                  <li>Use the "SpiñO Analysis" / "Teleology Check" panel when you want to see what teleology patterns were detected.</li>
+                </ul>
+                <p className="text-xs mt-2">
+                  SpiñO is not here just to comfort you with nice words. It cares in a stricter way: by helping you see what is really
+                  <span className="font-semibold"> causing</span> your pain, so you can stop living as if the universe is writing a tragic script about you.
+                </p>
+              </section>
             </div>
           </motion.div>
         )}
@@ -256,49 +305,6 @@ export default function HomePage() {
             ? 'bg-white/5 border-l border-white/10' 
             : 'bg-black/5 border-l border-black/10'
         }`}>
-          {/* Session Mode Toggle */}
-          <div className={`rounded-lg p-3 ${
-            darkMode 
-              ? 'bg-white/5 border border-white/10' 
-              : 'bg-black/5 border border-black/10'
-          }`}>
-            <h3 className={`text-sm font-medium mb-2 ${darkMode ? 'text-white' : 'text-black'}`}>
-              Session Mode
-            </h3>
-            <div className="space-y-2">
-              <button
-                onClick={() => setSessionMode('therapy')}
-                className={`w-full px-3 py-2 rounded text-xs transition-colors flex items-center space-x-2 ${
-                  sessionMode === 'therapy'
-                    ? darkMode 
-                      ? 'bg-blue-600 text-white' 
-                      : 'bg-blue-500 text-white'
-                    : darkMode 
-                      ? 'bg-white/5 text-white/70 hover:bg-white/10' 
-                      : 'bg-black/5 text-black/70 hover:bg-black/10'
-                }`}
-              >
-                <Image src="/favicon.gif" alt="SpiñO" width={32} height={32} className="rounded" />
-                <span>Therapy Session</span>
-              </button>
-              <button
-                onClick={() => setSessionMode('philosophical')}
-                className={`w-full px-3 py-2 rounded text-xs transition-colors flex items-center space-x-2 ${
-                  sessionMode === 'philosophical'
-                    ? darkMode 
-                      ? 'bg-purple-600 text-white' 
-                      : 'bg-purple-500 text-white'
-                    : darkMode 
-                      ? 'bg-white/5 text-white/70 hover:bg-white/10' 
-                      : 'bg-black/5 text-black/70 hover:bg-black/10'
-                }`}
-              >
-                <Image src="/favicon.gif" alt="SpiñO" width={32} height={32} className="rounded" />
-                <span>Philosophical Reflection</span>
-              </button>
-            </div>
-          </div>
-          
           {/* Session Management */}
           <div className={`rounded-lg p-3 ${
             darkMode 
@@ -337,49 +343,6 @@ export default function HomePage() {
           </div>
         </div>
         
-        {/* Mobile Navigation Menu - Shown only on mobile */}
-        <div className="lg:hidden fixed top-20 left-4 right-4 z-40">
-          <div className={`rounded-xl p-3 shadow-lg ${
-            darkMode 
-              ? 'bg-white/10 border border-white/20 backdrop-blur-sm' 
-              : 'bg-black/10 border border-black/20 backdrop-blur-sm'
-          }`}>
-            <div className="flex items-center justify-between">
-              <div className="flex space-x-1">
-                <button
-                  onClick={() => setSessionMode('therapy')}
-                  className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1 ${
-                    sessionMode === 'therapy'
-                      ? darkMode 
-                        ? 'bg-blue-600 text-white' 
-                        : 'bg-blue-500 text-white'
-                      : darkMode 
-                        ? 'bg-white/10 text-white/70 hover:bg-white/20' 
-                        : 'bg-black/10 text-black/70 hover:bg-black/20'
-                  }`}
-                >
-                  <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-                  <span>Therapy</span>
-                </button>
-                <button
-                  onClick={() => setSessionMode('philosophical')}
-                  className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1 ${
-                    sessionMode === 'philosophical'
-                      ? darkMode 
-                        ? 'bg-purple-600 text-white' 
-                        : 'bg-purple-500 text-white'
-                      : darkMode 
-                        ? 'bg-white/10 text-white/70 hover:bg-white/20' 
-                        : 'bg-black/10 text-black/70 hover:bg-black/20'
-                  }`}
-                >
-                  <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-                  <span>Philosophy</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   )

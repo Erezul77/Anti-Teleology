@@ -16,7 +16,7 @@ export interface SessionData {
     realTimeAnalysis?: any;
   }>;
   timestamp: Date;
-  sessionMode: 'therapy' | 'philosophical';
+  sessionMode: 'coaching';
   language: string;
   analytics: {
     totalMessages: number;
