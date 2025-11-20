@@ -161,7 +161,17 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     "life is trying to",
     "the universe is trying to",
     "meant to be",
-    "supposed to happen"
+    "supposed to happen",
+    "so i'll finally",
+    "so i will finally",
+    "so that i finally",
+    "so i can finally",
+    "keeps arranging them so i",
+    "life keeps arranging",
+    "life keeps sending me",
+    "the universe keeps sending me",
+    "keeps sending me",
+    "keeps bringing me"
   ];
 
   // Standard teleology keywords
@@ -188,7 +198,10 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     /(here|this|life)\s+is\s+here\s+to\s+\w+/i,
     /forcing\s+me\s+to\s+(grow|change|learn)/i,
     /life\s+is\s+forcing\s+me/i,
-    /the\s+universe\s+(wants|is\s+trying|is\s+forcing)/i
+    /the\s+universe\s+(wants|is\s+trying|is\s+forcing)/i,
+    /so\s+(i|i'll|i will|i can|that i)\s+finally/i,
+    /(life|the universe|fate|destiny)\s+keeps\s+(arranging|sending|bringing|giving)\s+(them|me|us)\s+so\s+(i|i'll|i will|i can|that i)/i,
+    /keeps\s+(arranging|sending|bringing|giving)\s+(them|me|us)\s+so\s+(i|i'll|i will|i can|that i)\s+finally/i
   ];
 
   const detected: string[] = [];
@@ -301,6 +314,25 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
 
   // Call LLM to generate purposeClaim and neutralCausalParaphrase
   const { purposeClaim, neutralCausalParaphrase } = await generateTeleologySummaries(input);
+
+  // Safety net: if LLM clearly sees teleology but heuristics are near zero
+  const hasPurpose = !!purposeClaim && purposeClaim.trim().length > 0;
+  const heuristicScore = score;
+
+  if (heuristicScore < 0.2 && hasPurpose) {
+    // Bump score to moderate teleology level
+    score = 0.4;
+
+    // If type is null or none, set a sensible default
+    if (!teleologyType || teleologyType === "harmless/weak") {
+      teleologyType = "personal-meaning"; // Default to personal-meaning for missed patterns
+    }
+
+    // If risk is low, bump it to medium
+    if (manipulationRisk === "low") {
+      manipulationRisk = "medium";
+    }
+  }
 
   const analysis: TeleologyAnalysis = {
     teleologyScore: score,
