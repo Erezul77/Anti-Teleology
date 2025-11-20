@@ -323,8 +323,8 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     // Bump score to moderate teleology level
     score = 0.4;
 
-    // If type is null or none, set a sensible default
-    if (!teleologyType || teleologyType === "harmless/weak") {
+    // If type is null, set a sensible default
+    if (!teleologyType) {
       teleologyType = "personal-meaning"; // Default to personal-meaning for missed patterns
     }
 
