@@ -167,7 +167,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-300' : 'text-gray-600'
           }`}
         >
-          Your AI companion for therapy & philosophy
+          Your AI companion for moving from teleology to causal clarity
         </motion.p>
       </div>
 
