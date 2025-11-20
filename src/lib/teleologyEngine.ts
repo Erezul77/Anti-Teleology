@@ -234,7 +234,7 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
   // Calculate score: strong patterns add 0.3 each, standard keywords add 0.1 each
   const strongScore = Math.min(0.9, strongPatternCount * 0.3);
   const standardScore = Math.min(0.7, (detected.length - strongPatternCount) * 0.1);
-  const score = Math.min(1, strongScore + standardScore);
+  let score = Math.min(1, strongScore + standardScore);
 
   // Improved classification with collective, moral-desert, and personal-meaning types
   let teleologyType: TeleologyType | null = null;
