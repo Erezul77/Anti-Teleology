@@ -15,9 +15,13 @@ function getOpenAIClient(): OpenAI {
 
 export type TeleologyType =
   | "personal"
+  | "personal-meaning"
+  | "cosmic-plan"
   | "religious"
   | "moralistic"
+  | "moral-desert"
   | "national/ideological"
+  | "collective-destiny"
   | "conspiracy"
   | "harmless/weak";
 
@@ -144,6 +148,23 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
   // Heuristic-based detection (keywords, patterns)
   const lower = input.toLowerCase();
 
+  // Strong teleology patterns (add significant weight)
+  const strongTeleologyPatterns = [
+    "everything happens for a reason",
+    "happens for a reason",
+    "this happened for a reason",
+    "here to push me",
+    "here to push",
+    "this chaos is here to",
+    "life is forcing me to grow",
+    "life is forcing me",
+    "life is trying to",
+    "the universe is trying to",
+    "meant to be",
+    "supposed to happen"
+  ];
+
+  // Standard teleology keywords
   const teleologyKeywords = [
     "in order to",
     "so that",
@@ -156,13 +177,53 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     "chosen",
     "god wants",
     "history wants",
-    "the universe wants"
+    "the universe wants",
+    "teaching me",
+    "showing me",
+    "telling me"
   ];
 
-  const detected: string[] = teleologyKeywords.filter((k) => lower.includes(k));
-  const score = detected.length > 0 ? Math.min(1, 0.3 + detected.length * 0.1) : 0;
+  // Check for strong patterns first (regex for flexible matching)
+  const strongPatternRegexes = [
+    /(here|this|life)\s+is\s+here\s+to\s+\w+/i,
+    /forcing\s+me\s+to\s+(grow|change|learn)/i,
+    /life\s+is\s+forcing\s+me/i,
+    /the\s+universe\s+(wants|is\s+trying|is\s+forcing)/i
+  ];
 
-  // Very naive classification for now:
+  const detected: string[] = [];
+  let strongPatternCount = 0;
+
+  // Check strong patterns
+  for (const pattern of strongTeleologyPatterns) {
+    if (lower.includes(pattern)) {
+      detected.push(pattern);
+      strongPatternCount++;
+    }
+  }
+
+  // Check regex patterns
+  for (const regex of strongPatternRegexes) {
+    if (regex.test(input)) {
+      strongPatternCount++;
+      const match = input.match(regex);
+      if (match) detected.push(match[0]);
+    }
+  }
+
+  // Check standard keywords
+  for (const keyword of teleologyKeywords) {
+    if (lower.includes(keyword) && !detected.includes(keyword)) {
+      detected.push(keyword);
+    }
+  }
+
+  // Calculate score: strong patterns add 0.3 each, standard keywords add 0.1 each
+  const strongScore = Math.min(0.9, strongPatternCount * 0.3);
+  const standardScore = Math.min(0.7, (detected.length - strongPatternCount) * 0.1);
+  const score = Math.min(1, strongScore + standardScore);
+
+  // Improved classification with collective, moral-desert, and personal-meaning types
   let teleologyType: TeleologyType | null = null;
   let manipulationRisk: ManipulationRisk = "low";
 
@@ -170,23 +231,71 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     teleologyType = null;
     manipulationRisk = "low";
   } else {
-    if (lower.includes("god") || lower.includes("universe") || lower.includes("fate") || lower.includes("destiny")) {
+    // Check for collective markers first
+    const collectiveMarkers = [
+      "we", "our people", "our country", "this nation", "we were chosen",
+      "our suffering", "our people were", "chosen people", "our nation"
+    ];
+    const hasCollectiveMarkers = collectiveMarkers.some(marker => lower.includes(marker));
+    const hasChosen = lower.includes("chosen") && (hasCollectiveMarkers || lower.includes("we") || lower.includes("our"));
+
+    // Check for moral-desert markers
+    const moralDesertMarkers = [
+      "deserve", "deserves", "punish", "punishment", "price i have to pay",
+      "price to pay", "i deserve this", "they deserve this"
+    ];
+    const hasMoralDesert = moralDesertMarkers.some(marker => lower.includes(marker));
+
+    // Check for religious markers (explicit religious lexicon)
+    const religiousMarkers = [
+      "god", "divine", "sin", "judgment", "god punished", "divine plan",
+      "god wants", "god is", "holy", "sacred"
+    ];
+    const hasReligious = religiousMarkers.some(marker => lower.includes(marker));
+
+    // Check for existential/cosmic markers (without explicit religion)
+    const cosmicMarkers = [
+      "fate", "destiny", "meant to be", "the universe wants", "the universe is trying",
+      "life is trying", "life is forcing", "cosmic", "the universe"
+    ];
+    const hasCosmic = cosmicMarkers.some(marker => lower.includes(marker)) && !hasReligious;
+
+    // Check for conspiracy markers
+    const hasConspiracy = lower.includes("conspiracy") || 
+                         lower.includes("they are all") || 
+                         lower.includes("everything is orchestrated") ||
+                         lower.includes("orchestrated");
+
+    // Type classification logic
+    if (hasCollectiveMarkers && (hasChosen || lower.includes("suffer") || lower.includes("sacrifice"))) {
+      teleologyType = "collective-destiny";
+      manipulationRisk = hasChosen || lower.includes("sacrifice") || lower.includes("must suffer") ? "high" : "medium";
+    } else if (hasMoralDesert) {
+      teleologyType = "moral-desert";
+      manipulationRisk = "high"; // Moral-desert is always high risk
+    } else if (hasReligious) {
       teleologyType = "religious";
+      manipulationRisk = hasMoralDesert ? "high" : "medium";
+    } else if (hasConspiracy) {
+      teleologyType = "conspiracy";
+      manipulationRisk = "medium";
+    } else if (hasCosmic || lower.includes("meant to be") || lower.includes("fate") || lower.includes("destiny")) {
+      teleologyType = "personal-meaning";
+      manipulationRisk = hasMoralDesert ? "high" : "medium";
     } else if (lower.includes("nation") || lower.includes("history") || lower.includes("the people")) {
       teleologyType = "national/ideological";
-    } else if (lower.includes("conspiracy") || lower.includes("they are all") || lower.includes("everything is orchestrated")) {
-      teleologyType = "conspiracy";
-    } else {
-      teleologyType = "personal";
-    }
-
-    // Risk heuristic
-    if (lower.includes("deserve") || lower.includes("punishment") || lower.includes("cleanse") || lower.includes("eradicate")) {
-      manipulationRisk = "high";
-    } else if (teleologyType === "religious" || teleologyType === "national/ideological" || teleologyType === "conspiracy") {
       manipulationRisk = "medium";
     } else {
-      manipulationRisk = "low";
+      teleologyType = "personal";
+      manipulationRisk = hasMoralDesert ? "high" : "low";
+    }
+
+    // Additional risk adjustments
+    if (hasMoralDesert && (hasCollectiveMarkers || lower.includes("they deserve"))) {
+      manipulationRisk = "high"; // Moral-desert directed at groups or others is especially high risk
+    }
+    if (lower.includes("cleanse") || lower.includes("eradicate") || lower.includes("purge")) {
+      manipulationRisk = "high";
     }
   }
 
