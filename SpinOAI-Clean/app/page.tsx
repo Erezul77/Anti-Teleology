@@ -149,7 +149,7 @@ export default function HomePage() {
   return (
     <div className={`h-screen transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Beautiful Centered Header - Mobile Responsive */}
-      <div className="fixed top-2 sm:top-4 left-1/2 transform -translate-x-1/2 z-40 text-center px-2">
+      <div className="fixed top-2 sm:top-4 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2">
         <motion.h1 
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -189,7 +189,7 @@ export default function HomePage() {
             initial={{ opacity: 0, y: -10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            className={`absolute top-12 left-0 w-72 sm:w-80 p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
+            className={`absolute top-12 left-0 w-96 sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
               darkMode 
                 ? 'bg-gray-900/95 border-gray-600 text-white' 
                 : 'bg-white/95 border-gray-300 text-gray-900'
