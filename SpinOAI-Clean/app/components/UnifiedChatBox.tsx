@@ -85,7 +85,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
       >
         <div className="flex items-center space-x-2">
           <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-purple-400" />
-          <h3 className="text-sm sm:text-lg font-semibold text-white">Spino Analysis</h3>
+          <h3 className="text-sm sm:text-lg font-semibold text-white">SpiñO Analysis</h3>
         </div>
         <motion.div
           animate={{ rotate: isCollapsed ? 0 : 180 }}
@@ -109,7 +109,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 mb-4">
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Unified Score</span>
           </div>
           <div className="text-xs sm:text-sm font-medium text-white">{Math.round((adequacy.unifiedScore || 0) * 100) / 100}/100</div>
@@ -118,7 +118,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
         
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Spino α/Δα/χ</span>
           </div>
           <div className="text-xs sm:text-sm font-medium text-white">
@@ -130,7 +130,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
         
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Noesis Total</span>
           </div>
           <div className="text-xs sm:text-sm font-medium text-white">{Math.round((adequacy.noesisAdequacy?.total || 0) * 100) / 100}/19</div>
@@ -139,7 +139,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
         
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Emotional State</span>
           </div>
           <div className="text-xs sm:text-sm font-medium text-white capitalize">{emotional.primaryAffect || 'neutral'}</div>
@@ -151,7 +151,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 mb-4">
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Therapeutic Stage</span>
           </div>
           <div className="text-xs sm:text-sm font-medium text-white capitalize">{message.therapeuticStage || 'identification'}</div>
@@ -160,7 +160,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
         
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Freedom Ratio</span>
           </div>
           <div className="text-xs sm:text-sm font-medium text-white">{((emotional.freedomRatio || 0) * 100).toFixed(0)}%</div>
@@ -172,7 +172,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
       {message.causalChain && message.causalChain.length > 0 && (
         <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
           <div className="flex items-center space-x-1 sm:space-x-2 mb-2">
-            <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
             <span className="text-xs text-white/60">Causal Chain</span>
           </div>
           <div className="text-xs text-white/80 space-y-1">
@@ -198,7 +198,7 @@ const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
 export function UnifiedChatBox({ messages, setMessages, darkMode, language: externalLanguage, sessionMode = 'therapy' }: UnifiedChatBoxProps) {
   const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false)
+  const [expandedAnalysisMessages, setExpandedAnalysisMessages] = useState<Set<number>>(new Set())
   const messagesEndRef = useRef<HTMLDivElement>(null)
   
   // Generate session and user IDs
@@ -421,7 +421,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                                      {message.role === 'assistant' && (
                      <Image 
                        src="/favicon.gif" 
-                       alt="Spino AI" 
+                       alt="SpiñO" 
                        width={96} 
                        height={96} 
                        className="rounded-full"
@@ -429,28 +429,35 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                    )}
                   <div className="flex-1">
                     <div className="text-xs sm:text-sm font-medium mb-1" style={{fontFamily: 'Arial Unicode MS, Arial, sans-serif'}}>
-                      {message.role === 'user' ? 'You' : 'Spino AI'}
+                      {message.role === 'user' ? 'You' : 'SpiñO'}
                     </div>
                     <div className="text-sm sm:text-base leading-relaxed whitespace-pre-wrap">
                       {message.content}
                     </div>
                     
                     {/* Show technical details toggle for assistant messages */}
-                    {message.role === 'assistant' && message.adequacyScore && (
+                    {message.role === 'assistant' && (message.teleology || message.adequacyScore) && (
                       <div className="mt-4">
                         <button
-                          onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
+                          onClick={() => {
+                            const newExpanded = new Set(expandedAnalysisMessages)
+                            if (newExpanded.has(index)) {
+                              newExpanded.delete(index)
+                            } else {
+                              newExpanded.add(index)
+                            }
+                            setExpandedAnalysisMessages(newExpanded)
+                          }}
                           className={`flex items-center space-x-1 sm:space-x-2 text-xs ${
                             darkMode ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'
                           }`}
                         >
-                          {showTechnicalDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>Spino Analysis</span>
+                          {expandedAnalysisMessages.has(index) ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          <span>SpiñO Analysis</span>
                         </button>
                         
-                        {showTechnicalDetails && (
-                          <div className="mt-3 space-y-3">
-                            <UnifiedRealTimeDashboard message={message} />
+                        {expandedAnalysisMessages.has(index) && (
+                          <div className="mt-3">
                             <TeleologyPanel teleology={message.teleology ?? null} darkMode={darkMode} />
                           </div>
                         )}
@@ -476,7 +483,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
               <div className="flex items-center space-x-3">
                                  <Image 
                    src="/favicon.gif" 
-                   alt="Spino AI" 
+                   alt="SpiñO" 
                    width={96} 
                    height={96} 
                    className="rounded-full animate-pulse"

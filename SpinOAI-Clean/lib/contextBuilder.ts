@@ -12,6 +12,8 @@ export interface RichContext {
   relationshipContext: string
   manipulationContext: string
   teleologyAnalysis?: string // Teleology analysis summary
+  teleologyScore?: number // Teleology score for conditional logic
+  purposeClaim?: string | null // Purpose claim for conditional logic
   therapeuticGoals: string[]
   responseGuidance: ResponseGuidance
 }
@@ -136,7 +138,8 @@ export class ContextBuilder {
     // Build teleology analysis summary
     let teleologySummary = ''
     if (teleologyAnalysis) {
-      if (teleologyAnalysis.teleologyScore > 0) {
+      // Only include teleology summary if score is meaningful (>= 0.2) or purposeClaim exists
+      if (teleologyAnalysis.teleologyScore >= 0.2 || teleologyAnalysis.purposeClaim) {
         teleologySummary = `Teleology Analysis:
 - Teleology Score: ${teleologyAnalysis.teleologyScore.toFixed(2)}
 - Teleology Type: ${teleologyAnalysis.teleologyType || 'none'}
@@ -148,9 +151,9 @@ ${teleologyAnalysis.purposeClaim ? `"${teleologyAnalysis.purposeClaim}"` : 'None
 
 Neutral Causal Paraphrase (same content in causal terms):
 ${teleologyAnalysis.neutralCausalParaphrase ? `"${teleologyAnalysis.neutralCausalParaphrase}"` : 'Not generated - use the detected phrases and your analysis to construct a causal view.'}`
-      } else {
-        teleologySummary = 'Teleology Analysis: No clear teleological patterns detected. Focus on concrete causes and conditions.'
       }
+      // If score is below 0.2 and no purposeClaim, don't include teleology summary at all
+      // The structured data (teleologyScore, purposeClaim) will still be passed for conditional logic
     }
 
     const richContext: RichContext = {
@@ -161,6 +164,8 @@ ${teleologyAnalysis.neutralCausalParaphrase ? `"${teleologyAnalysis.neutralCausa
       relationshipContext: this.buildRelationshipSummary(relationshipContext),
       manipulationContext,
       teleologyAnalysis: teleologySummary,
+      teleologyScore: teleologyAnalysis?.teleologyScore,
+      purposeClaim: teleologyAnalysis?.purposeClaim || null,
       therapeuticGoals: adequacyContext.therapeuticGoals,
       responseGuidance
     }

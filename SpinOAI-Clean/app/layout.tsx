@@ -6,23 +6,23 @@ import './globals.css'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'SpinO AI - SpinO\'s Therapeutic AI System',
-  description: 'Experience therapeutic conversations guided by SpinO\'s philosophy. Understand your emotions through the lens of Ethics Part 3.',
-  keywords: 'SpinO, AI therapy, philosophy, emotions, affects, therapeutic conversation',
-  authors: [{ name: 'SpinO AI Team' }],
-  creator: 'SpinO AI',
-  publisher: 'SpinO AI',
+  title: 'SpiñO - SpiñO\'s Therapeutic AI System',
+  description: 'Experience therapeutic conversations guided by SpiñO\'s philosophy. Understand your emotions through the lens of Ethics Part 3.',
+  keywords: 'SpiñO, AI therapy, philosophy, emotions, affects, therapeutic conversation',
+  authors: [{ name: 'SpiñO Team' }],
+  creator: 'SpiñO',
+  publisher: 'SpiñO',
   robots: 'index, follow',
   openGraph: {
-    title: 'SpinO AI - SpinO\'s Therapeutic AI System',
-    description: 'Experience therapeutic conversations guided by SpinO\'s philosophy.',
+    title: 'SpiñO - SpiñO\'s Therapeutic AI System',
+    description: 'Experience therapeutic conversations guided by SpiñO\'s philosophy.',
     type: 'website',
     locale: 'en_US',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'SpinO AI - SpinO\'s Therapeutic AI System',
-    description: 'Experience therapeutic conversations guided by SpinO\'s philosophy.',
+    title: 'SpiñO - SpiñO\'s Therapeutic AI System',
+    description: 'Experience therapeutic conversations guided by SpiñO\'s philosophy.',
   },
   icons: {
     icon: [

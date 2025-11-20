@@ -157,7 +157,7 @@ export default function HomePage() {
             darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'
           }`}
         >
-          Welcome to SpinO AI
+          Welcome to SpiñO
         </motion.h1>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -195,8 +195,8 @@ export default function HomePage() {
                 : 'bg-white/95 border-gray-300 text-gray-900'
             }`}
           >
-            <h3 className="font-semibold mb-3 text-sm">Spino-AI</h3>
-            <h4 className="font-medium mb-3 text-xs text-gray-400">Welcome to SpinO AI</h4>
+            <h3 className="font-semibold mb-3 text-sm">SpiñO</h3>
+            <h4 className="font-medium mb-3 text-xs text-gray-400">Welcome to SpiñO</h4>
             <div className="space-y-2 text-xs">
               <p>• <strong>Therapy Mode:</strong> Engage in therapeutic conversations with AI guidance</p>
               <p>• <strong>Philosophical Mode:</strong> Explore deep philosophical discussions</p>
@@ -278,7 +278,7 @@ export default function HomePage() {
                       : 'bg-black/5 text-black/70 hover:bg-black/10'
                 }`}
               >
-                <Image src="/favicon.gif" alt="Spino" width={32} height={32} className="rounded" />
+                <Image src="/favicon.gif" alt="SpiñO" width={32} height={32} className="rounded" />
                 <span>Therapy Session</span>
               </button>
               <button
@@ -293,7 +293,7 @@ export default function HomePage() {
                       : 'bg-black/5 text-black/70 hover:bg-black/10'
                 }`}
               >
-                <Image src="/favicon.gif" alt="Spino" width={32} height={32} className="rounded" />
+                <Image src="/favicon.gif" alt="SpiñO" width={32} height={32} className="rounded" />
                 <span>Philosophical Reflection</span>
               </button>
             </div>
@@ -317,7 +317,7 @@ export default function HomePage() {
                     : 'bg-blue-500 text-white hover:bg-blue-600'
                 }`}
               >
-                <Image src="/favicon.gif" alt="Spino" width={32} height={32} className="rounded" />
+                <Image src="/favicon.gif" alt="SpiñO" width={32} height={32} className="rounded" />
                 <span>Load Previous Session</span>
               </button>
             </div>
@@ -358,7 +358,7 @@ export default function HomePage() {
                         : 'bg-black/10 text-black/70 hover:bg-black/20'
                   }`}
                 >
-                  <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+                  <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
                   <span>Therapy</span>
                 </button>
                 <button
@@ -373,7 +373,7 @@ export default function HomePage() {
                         : 'bg-black/10 text-black/70 hover:bg-black/20'
                   }`}
                 >
-                  <Image src="/favicon.gif" alt="Spino" width={24} height={24} className="rounded" />
+                  <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
                   <span>Philosophy</span>
                 </button>
               </div>
