@@ -144,6 +144,27 @@ If there is no teleological story, set "purposeClaim" to an empty string.
  *  - SpiñO can call it on user messages,
  *  - Honestra components can call it on feed content / posts.
  */
+/**
+ * Check if a teleology phrase is negated in the text
+ */
+function isNegated(text: string, index: number): boolean {
+  // Look back a bit from the match index (e.g. 30–50 chars) for negation words
+  const windowStart = Math.max(0, index - 50);
+  const context = text.slice(windowStart, index).toLowerCase();
+
+  const negationMarkers = [
+    "don't", "do not", "dont",
+    "not", "isn't", "isnt", "aren't", "arent",
+    "no", "never", "can't", "cannot", "won't", "wont",
+    "doesn't", "does not", "doesnt",
+    "didn't", "did not", "didnt",
+    "haven't", "have not", "havent",
+    "hasn't", "has not", "hasnt"
+  ];
+
+  return negationMarkers.some(marker => context.includes(marker));
+}
+
 export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis> {
   // Heuristic-based detection (keywords, patterns)
   const lower = input.toLowerCase();
@@ -207,27 +228,77 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
   const detected: string[] = [];
   let strongPatternCount = 0;
 
-  // Check strong patterns
+  // Patterns that should be checked for negation
+  const negationSensitivePatterns = [
+    "meant to be",
+    "meant to",
+    "happens for a reason",
+    "for a reason",
+    "everything happens for a reason",
+    "this happened for a reason"
+  ];
+
+  // Check strong patterns with negation awareness
   for (const pattern of strongTeleologyPatterns) {
-    if (lower.includes(pattern)) {
-      detected.push(pattern);
-      strongPatternCount++;
+    const isNegationSensitive = negationSensitivePatterns.includes(pattern);
+    let idx = lower.indexOf(pattern);
+    
+    if (idx !== -1) {
+      let foundNonNegated = false;
+      while (idx !== -1) {
+        if (!isNegationSensitive || !isNegated(lower, idx)) {
+          foundNonNegated = true;
+          if (!detected.includes(pattern)) {
+            detected.push(pattern);
+          }
+        }
+        idx = lower.indexOf(pattern, idx + pattern.length);
+      }
+      if (foundNonNegated) {
+        strongPatternCount++;
+      }
     }
   }
 
-  // Check regex patterns
+  // Check regex patterns (less precise negation check, but still attempt)
   for (const regex of strongPatternRegexes) {
-    if (regex.test(input)) {
+    const matches = input.matchAll(new RegExp(regex.source, regex.flags));
+    let foundNonNegated = false;
+    for (const match of matches) {
+      if (match.index !== undefined && !isNegated(input.toLowerCase(), match.index)) {
+        foundNonNegated = true;
+        if (match[0] && !detected.includes(match[0])) {
+          detected.push(match[0]);
+        }
+      }
+    }
+    if (foundNonNegated) {
       strongPatternCount++;
-      const match = input.match(regex);
-      if (match) detected.push(match[0]);
     }
   }
 
-  // Check standard keywords
+  // Check standard keywords with negation awareness for key phrases
   for (const keyword of teleologyKeywords) {
-    if (lower.includes(keyword) && !detected.includes(keyword)) {
-      detected.push(keyword);
+    if (negationSensitivePatterns.includes(keyword)) {
+      // Already handled above, skip
+      continue;
+    }
+    
+    const isNegationSensitive = keyword === "meant to" || keyword.includes("for a reason");
+    let idx = lower.indexOf(keyword);
+    
+    if (idx !== -1) {
+      let foundNonNegated = false;
+      while (idx !== -1) {
+        if (!isNegationSensitive || !isNegated(lower, idx)) {
+          foundNonNegated = true;
+          break; // Found at least one non-negated instance
+        }
+        idx = lower.indexOf(keyword, idx + keyword.length);
+      }
+      if (foundNonNegated && !detected.includes(keyword)) {
+        detected.push(keyword);
+      }
     }
   }
 
@@ -244,13 +315,23 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
     teleologyType = null;
     manipulationRisk = "low";
   } else {
-    // Check for collective markers first
+    // Check for collective/national markers (strict criteria)
     const collectiveMarkers = [
-      "we", "our people", "our country", "this nation", "we were chosen",
-      "our suffering", "our people were", "chosen people", "our nation"
+      "our country", "this country", "our nation", "this nation", "the state", "the regime",
+      "our people", "our side", "our party", "our movement", "the party", "the movement",
+      "we were chosen", "chosen people", "our nation", "this country", "our country"
     ];
     const hasCollectiveMarkers = collectiveMarkers.some(marker => lower.includes(marker));
-    const hasChosen = lower.includes("chosen") && (hasCollectiveMarkers || lower.includes("we") || lower.includes("our"));
+    const hasChosen = lower.includes("chosen") && (hasCollectiveMarkers || 
+      (lower.includes("we") && (lower.includes("country") || lower.includes("nation") || lower.includes("people"))));
+    
+    // Check for personal relationship markers
+    const personalRelationshipMarkers = [
+      "partner", "relationship", "breakup", "breakups", "my ex", "my exes",
+      "dating", "romance", "love life", "significant other", "spouse", "wife", "husband"
+    ];
+    const hasPersonalRelationshipMarkers = personalRelationshipMarkers.some(marker => lower.includes(marker));
+    const hasFirstPerson = /\bI\b|\bme\b|\bmy\b|\bmine\b/i.test(input);
 
     // Check for moral-desert markers
     const moralDesertMarkers = [
@@ -280,9 +361,13 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
                          lower.includes("orchestrated");
 
     // Type classification logic
+    // First check for collective/national (strict criteria - only with clear group markers)
     if (hasCollectiveMarkers && (hasChosen || lower.includes("suffer") || lower.includes("sacrifice"))) {
       teleologyType = "collective-destiny";
       manipulationRisk = hasChosen || lower.includes("sacrifice") || lower.includes("must suffer") ? "high" : "medium";
+    } else if (hasCollectiveMarkers && (lower.includes("nation") || lower.includes("country") || lower.includes("state") || lower.includes("regime"))) {
+      teleologyType = "national/ideological";
+      manipulationRisk = "medium";
     } else if (hasMoralDesert) {
       teleologyType = "moral-desert";
       manipulationRisk = "high"; // Moral-desert is always high risk
@@ -293,12 +378,19 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
       teleologyType = "conspiracy";
       manipulationRisk = "medium";
     } else if (hasCosmic || lower.includes("meant to be") || lower.includes("fate") || lower.includes("destiny")) {
+      // Personal-meaning for cosmic/existential patterns
       teleologyType = "personal-meaning";
       manipulationRisk = hasMoralDesert ? "high" : "medium";
-    } else if (lower.includes("nation") || lower.includes("history") || lower.includes("the people")) {
-      teleologyType = "national/ideological";
-      manipulationRisk = "medium";
+    } else if (hasPersonalRelationshipMarkers && hasFirstPerson) {
+      // Personal relationship teleology (e.g., "life keeps sending me the same partner")
+      teleologyType = "personal-meaning";
+      manipulationRisk = hasMoralDesert ? "high" : "medium";
+    } else if (hasFirstPerson && !hasCollectiveMarkers) {
+      // First-person narrative without collective markers -> personal
+      teleologyType = "personal-meaning";
+      manipulationRisk = hasMoralDesert ? "high" : "low";
     } else {
+      // Default to personal if we have teleology but no clear category
       teleologyType = "personal";
       manipulationRisk = hasMoralDesert ? "high" : "low";
     }
