@@ -262,18 +262,23 @@ export async function analyzeTeleology(input: string): Promise<TeleologyAnalysis
 
   // Check regex patterns (less precise negation check, but still attempt)
   for (const regex of strongPatternRegexes) {
-    const matches = input.matchAll(new RegExp(regex.source, regex.flags));
-    let foundNonNegated = false;
-    for (const match of matches) {
-      if (match.index !== undefined && !isNegated(input.toLowerCase(), match.index)) {
-        foundNonNegated = true;
-        if (match[0] && !detected.includes(match[0])) {
-          detected.push(match[0]);
+    try {
+      const matches = Array.from(input.matchAll(regex));
+      let foundNonNegated = false;
+      for (const match of matches) {
+        if (match.index !== undefined && !isNegated(input.toLowerCase(), match.index)) {
+          foundNonNegated = true;
+          if (match[0] && !detected.includes(match[0])) {
+            detected.push(match[0]);
+          }
         }
       }
-    }
-    if (foundNonNegated) {
-      strongPatternCount++;
+      if (foundNonNegated) {
+        strongPatternCount++;
+      }
+    } catch (err) {
+      // If regex matching fails, skip this pattern
+      console.warn('[teleologyEngine] Regex pattern failed:', regex, err);
     }
   }
 

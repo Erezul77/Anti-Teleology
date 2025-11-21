@@ -28,13 +28,27 @@ export async function POST(request: NextRequest) {
 
     // Analyze teleology in user message
     console.log('🔍 Analyzing teleology in user message...')
-    const teleologyAnalysis = await analyzeTeleology(message)
-    console.log('📊 Teleology Analysis:', {
-      teleologyScore: teleologyAnalysis.teleologyScore,
-      teleologyType: teleologyAnalysis.teleologyType,
-      manipulationRisk: teleologyAnalysis.manipulationRisk,
-      detectedPhrases: teleologyAnalysis.detectedPhrases.length
-    })
+    let teleologyAnalysis;
+    try {
+      teleologyAnalysis = await analyzeTeleology(message)
+      console.log('📊 Teleology Analysis:', {
+        teleologyScore: teleologyAnalysis.teleologyScore,
+        teleologyType: teleologyAnalysis.teleologyType,
+        manipulationRisk: teleologyAnalysis.manipulationRisk,
+        detectedPhrases: teleologyAnalysis.detectedPhrases.length
+      })
+    } catch (teleologyError) {
+      console.error('❌ Teleology analysis failed:', teleologyError)
+      // Fallback to empty teleology analysis
+      teleologyAnalysis = {
+        teleologyScore: 0,
+        teleologyType: null,
+        manipulationRisk: 'low' as const,
+        detectedPhrases: [],
+        purposeClaim: null,
+        neutralCausalParaphrase: null
+      }
+    }
 
     // Process through the Emotional Wizard System
     const wizardResponse = await emotionalWizard.processRequest({
@@ -126,10 +140,13 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('❌ API Error:', error)
+    console.error('❌ Error stack:', error instanceof Error ? error.stack : 'No stack trace')
+    console.error('❌ Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)))
     return NextResponse.json(
       { 
         error: 'Emotional Wizard System processing failed',
-        details: error instanceof Error ? error.message : 'Unknown error'
+        details: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
       }, 
       { status: 500 }
     )
