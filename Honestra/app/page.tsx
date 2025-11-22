@@ -26,9 +26,7 @@ export default function LandingPage() {
 
       <section style={{ marginTop: "2rem" }}>
         <h2>Live firewall demo</h2>
-        <Suspense fallback={<div>Loading demo...</div>}>
-          <TeleologyDemo />
-        </Suspense>
+        <TeleologyDemo />
       </section>
 
       <section style={{ marginTop: "2rem" }}>
