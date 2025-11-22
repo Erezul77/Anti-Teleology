@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Activity, TrendingUp, Brain, Zap, Target, Lightbulb, Layers, Heart, Sparkles } from 'lucide-react'
+import { Send, ChevronDown, ChevronUp } from 'lucide-react'
 import Image from 'next/image'
 import TeleologyPanel from './TeleologyPanel'
 
@@ -61,139 +61,7 @@ interface UnifiedChatBoxProps {
   sessionMode?: 'coaching'
 }
 
-// Enhanced Real-time Dashboard Component
-const UnifiedRealTimeDashboard = ({ message }: { message: UnifiedMessage }) => {
-  const [isCollapsed, setIsCollapsed] = useState(false)
-  
-  if (!message.adequacyScore || !message.emotionalState) return null
-  
-  const adequacy = message.adequacyScore
-  const emotional = message.emotionalState
-  
-  // Additional safety checks
-  if (!adequacy.spinoAdequacy || !adequacy.noesisAdequacy) return null
-  
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="mt-4 bg-gradient-to-r from-purple-900/20 to-blue-900/20 border border-purple-500/30 rounded-xl backdrop-blur-sm overflow-hidden"
-    >
-      <div 
-        className="flex items-center justify-between p-3 sm:p-4 cursor-pointer hover:bg-white/5 transition-colors"
-        onClick={() => setIsCollapsed(!isCollapsed)}
-      >
-        <div className="flex items-center space-x-2">
-          <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-purple-400" />
-          <h3 className="text-sm sm:text-lg font-semibold text-white">SpiñO Analysis</h3>
-        </div>
-        <motion.div
-          animate={{ rotate: isCollapsed ? 0 : 180 }}
-          transition={{ duration: 0.2 }}
-        >
-          <ChevronUp className="w-4 h-4 sm:w-5 sm:h-5 text-purple-400" />
-        </motion.div>
-      </div>
-      
-      <AnimatePresence>
-        {!isCollapsed && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className="px-3 sm:px-4 pb-3 sm:pb-4"
-          >
-      
-      {/* Main Metrics Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 mb-4">
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Unified Score</span>
-          </div>
-          <div className="text-xs sm:text-sm font-medium text-white">{Math.round((adequacy.unifiedScore || 0) * 100) / 100}/100</div>
-          <div className="text-xs text-white/40">Confidence: {((adequacy.confidence || 0) * 100).toFixed(0)}%</div>
-        </div>
-        
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Spino α/Δα/χ</span>
-          </div>
-          <div className="text-xs sm:text-sm font-medium text-white">
-            α:{(adequacy.spinoAdequacy?.alpha || 0 * 100).toFixed(0)}% 
-            Δα:{(adequacy.spinoAdequacy?.deltaAlpha || 0 * 100).toFixed(0)}%
-          </div>
-          <div className="text-xs text-white/40">χ:{(adequacy.spinoAdequacy?.chi || 0 * 100).toFixed(0)}%</div>
-        </div>
-        
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Noesis Total</span>
-          </div>
-          <div className="text-xs sm:text-sm font-medium text-white">{Math.round((adequacy.noesisAdequacy?.total || 0) * 100) / 100}/19</div>
-          <div className="text-xs text-white/40">Freedom: {Math.round((adequacy.noesisAdequacy?.freedom || 0) * 100) / 100}/3</div>
-        </div>
-        
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Emotional State</span>
-          </div>
-          <div className="text-xs sm:text-sm font-medium text-white capitalize">{emotional.primaryAffect || 'neutral'}</div>
-          <div className="text-xs text-white/40">Intensity: {((emotional.intensity || 0) * 100).toFixed(0)}%</div>
-        </div>
-      </div>
-      
-      {/* Secondary Metrics Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 mb-4">
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Therapeutic Stage</span>
-          </div>
-          <div className="text-xs sm:text-sm font-medium text-white capitalize">{message.therapeuticStage || 'identification'}</div>
-          <div className="text-xs text-white/40">Layer: {message.onionLayer || 'surface'}</div>
-        </div>
-        
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-1">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Freedom Ratio</span>
-          </div>
-          <div className="text-xs sm:text-sm font-medium text-white">{((emotional.freedomRatio || 0) * 100).toFixed(0)}%</div>
-          <div className="text-xs text-white/40">Bondage: {emotional.bondageLevel || 'unknown'}</div>
-        </div>
-      </div>
-      
-      {/* Causal Chain - Only show if exists */}
-      {message.causalChain && message.causalChain.length > 0 && (
-        <div className="bg-black/20 rounded-lg p-2 sm:p-3 border border-white/10">
-          <div className="flex items-center space-x-1 sm:space-x-2 mb-2">
-            <Image src="/favicon.gif" alt="SpiñO" width={24} height={24} className="rounded" />
-            <span className="text-xs text-white/60">Causal Chain</span>
-          </div>
-          <div className="text-xs text-white/80 space-y-1">
-            {message.causalChain.slice(0, 2).map((chain, index) => (
-              <div key={index} className="flex items-start">
-                <span className="text-cyan-400 mr-1">•</span>
-                <span>{chain}</span>
-              </div>
-            ))}
-            {message.causalChain.length > 2 && (
-              <div className="text-white/60 text-xs">+{message.causalChain.length - 2} more...</div>
-            )}
-          </div>
-        </div>
-      )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
-  )
-}
+// Legacy analysis dashboard removed - using TeleologyPanel only
 
 export function UnifiedChatBox({ messages, setMessages, darkMode, language: externalLanguage, sessionMode = 'coaching' }: UnifiedChatBoxProps) {
   const [inputMessage, setInputMessage] = useState('')
@@ -435,8 +303,8 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                       {message.content}
                     </div>
                     
-                    {/* Show technical details toggle for assistant messages */}
-                    {message.role === 'assistant' && (message.teleology || message.adequacyScore) && (
+                    {/* Show teleology analysis toggle for assistant messages */}
+                    {message.role === 'assistant' && message.teleology && (
                       <div className="mt-4">
                         <button
                           onClick={() => {
@@ -453,7 +321,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                           }`}
                         >
                           {expandedAnalysisMessages.has(index) ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>SpiñO Analysis</span>
+                          <span>Spino Analysis – Teleology & Causality</span>
                         </button>
                         
                         {expandedAnalysisMessages.has(index) && (
