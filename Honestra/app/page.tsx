@@ -1,5 +1,8 @@
 import TeleologyDemo from "./_components/TeleologyDemo";
 
+// Force dynamic rendering to prevent build timeout
+export const dynamic = 'force-dynamic';
+
 export default function LandingPage() {
   return (
     <main>

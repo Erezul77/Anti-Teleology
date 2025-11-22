@@ -1,5 +1,8 @@
 import { FeedFirewallDemo } from "../_components/FeedFirewallDemo";
 
+// Force dynamic rendering to prevent build timeout
+export const dynamic = 'force-dynamic';
+
 export default function FeedDemoPage() {
   return (
     <main className="min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-950 to-black text-zinc-100">
