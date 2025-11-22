@@ -2,19 +2,29 @@
 
 import { useState } from "react";
 
-type TeleologyResult = {
-  teleologyScore?: number;
-  teleologyType?: string | null;
-  manipulationRisk?: string | null;
-  detectedPhrases?: string[];
+type TeleologyAnalysis = {
+  teleologyScore: number;
+  teleologyType: string | null;
+  manipulationRisk: string;
+  detectedPhrases: string[];
   purposeClaim?: string | null;
   neutralCausalParaphrase?: string | null;
+};
+
+type TeleologyDecision = {
+  action: "allow" | "annotate" | "warn" | "block";
+  reason: string;
+};
+
+type FirewallResult = {
+  decision: TeleologyDecision;
+  analysis: TeleologyAnalysis;
   error?: string;
 };
 
 export default function TeleologyDemo() {
   const [text, setText] = useState("");
-  const [result, setResult] = useState<TeleologyResult | null>(null);
+  const [result, setResult] = useState<FirewallResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,7 +37,7 @@ export default function TeleologyDemo() {
 
     try {
       console.log("[Honestra][teleology-demo] Sending request with text:", text);
-      const res = await fetch("/api/teleology", {
+      const res = await fetch("/api/firewall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
@@ -42,7 +52,8 @@ export default function TeleologyDemo() {
         return;
       }
 
-      setResult(data);
+      const firewallResult = data as FirewallResult;
+      setResult(firewallResult);
     } catch (err: any) {
       console.error("[Honestra][teleology-demo] error", err);
       setError("Unexpected error while calling the API");
@@ -64,7 +75,7 @@ export default function TeleologyDemo() {
 
       <div style={{ marginTop: "0.75rem" }}>
         <button onClick={handleAnalyze} disabled={loading || !text.trim()}>
-          {loading ? "Analyzing..." : "Analyze teleology"}
+          {loading ? "Analyzing..." : "Run firewall check"}
         </button>
       </div>
 
@@ -76,41 +87,65 @@ export default function TeleologyDemo() {
 
       {result && !error && (
         <section style={{ marginTop: "1rem" }}>
-          <h3>Analysis</h3>
-          <ul>
-            <li>
-              <strong>Teleology score:</strong>{" "}
-              {typeof result.teleologyScore === "number"
-                ? result.teleologyScore.toFixed(2)
-                : "n/a"}
-            </li>
-            <li>
-              <strong>Teleology type:</strong>{" "}
-              {result.teleologyType ?? "none"}
-            </li>
-            <li>
-              <strong>Manipulation risk:</strong>{" "}
-              {result.manipulationRisk ?? "n/a"}
-            </li>
-            <li>
-              <strong>Detected phrases:</strong>{" "}
-              {result.detectedPhrases && result.detectedPhrases.length > 0
-                ? result.detectedPhrases.join(", ")
-                : "none"}
-            </li>
-          </ul>
+          <div style={{ 
+            borderRadius: "0.75rem", 
+            border: "1px solid rgba(16, 185, 129, 0.4)", 
+            backgroundColor: "rgba(16, 185, 129, 0.1)", 
+            padding: "0.75rem 1rem", 
+            marginBottom: "1rem" 
+          }}>
+            <div style={{ fontSize: "0.875rem", fontWeight: "600", marginBottom: "0.25rem" }}>
+              Firewall decision:{" "}
+              <span style={{ textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                {result.decision.action}
+              </span>
+            </div>
+            <p style={{ marginTop: "0.25rem", fontSize: "0.875rem", color: "rgba(209, 250, 229, 0.8)" }}>
+              {result.decision.reason}
+            </p>
+          </div>
 
-          <h4>LLM summaries</h4>
-          <p>
-            <strong>Purpose claim:</strong>{" "}
-            {result.purposeClaim ??
-              "No clear teleological story extracted."}
-          </p>
-          <p>
-            <strong>Neutral causal paraphrase:</strong>{" "}
-            {result.neutralCausalParaphrase ??
-              "No causal paraphrase generated."}
-          </p>
+          <div style={{ 
+            borderRadius: "0.75rem", 
+            border: "1px solid rgba(63, 63, 70, 1)", 
+            backgroundColor: "rgba(39, 39, 42, 0.6)", 
+            padding: "1rem", 
+            display: "flex", 
+            flexDirection: "column", 
+            gap: "0.5rem", 
+            fontSize: "0.875rem" 
+          }}>
+            <div>
+              <span style={{ fontWeight: "500" }}>Teleology score:</span>{" "}
+              {result.analysis.teleologyScore.toFixed(2)}
+            </div>
+            <div>
+              <span style={{ fontWeight: "500" }}>Type:</span>{" "}
+              {result.analysis.teleologyType ?? "none"}
+            </div>
+            <div>
+              <span style={{ fontWeight: "500" }}>Manipulation risk:</span>{" "}
+              {result.analysis.manipulationRisk}
+            </div>
+            {result.analysis.detectedPhrases.length > 0 && (
+              <div>
+                <span style={{ fontWeight: "500" }}>Detected phrases:</span>{" "}
+                {result.analysis.detectedPhrases.join(", ")}
+              </div>
+            )}
+            {result.analysis.purposeClaim && (
+              <div>
+                <span style={{ fontWeight: "500" }}>Purpose story:</span>{" "}
+                {result.analysis.purposeClaim}
+              </div>
+            )}
+            {result.analysis.neutralCausalParaphrase && (
+              <div>
+                <span style={{ fontWeight: "500" }}>Causal paraphrase:</span>{" "}
+                {result.analysis.neutralCausalParaphrase}
+              </div>
+            )}
+          </div>
         </section>
       )}
     </>
