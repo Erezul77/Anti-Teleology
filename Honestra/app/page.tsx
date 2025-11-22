@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export default function LandingPage() {
   return (
-    <main>
+    <main style={{ minHeight: '100vh' }}>
       <section>
         <h1>Honestra – Teleology Firewall for Feeds and Platforms</h1>
         <p>
@@ -26,7 +26,9 @@ export default function LandingPage() {
 
       <section style={{ marginTop: "2rem" }}>
         <h2>Live firewall demo</h2>
-        <TeleologyDemo />
+        <Suspense fallback={<div>Loading demo...</div>}>
+          <TeleologyDemo />
+        </Suspense>
       </section>
 
       <section style={{ marginTop: "2rem" }}>
