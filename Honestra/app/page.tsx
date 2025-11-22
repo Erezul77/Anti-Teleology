@@ -54,8 +54,6 @@ export default function LandingPage() {
               color: "rgb(110, 231, 183)", 
               textDecoration: "none"
             }}
-            onMouseEnter={(e) => e.currentTarget.style.color = "rgb(167, 243, 208)"}
-            onMouseLeave={(e) => e.currentTarget.style.color = "rgb(110, 231, 183)"}
           >
             Open feed firewall demo →
           </a>
