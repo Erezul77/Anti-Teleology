@@ -1,0 +1,426 @@
+# MPL Playground — Stage 4Q Patch (Fuzzers + Stress Seeds + Watchdogs)
+
+This patch equips the MPL Playground with **graph fuzzers**, **deterministic stress seeds**, and **runtime watchdogs** for stability/perf testing. It builds on 4C–4P (canvas, worker, LOD, overlays, share/bookmark, themes, tours, search/live filters) and keeps a **zero‑dep** footprint.
+
+---
+
+## Highlights
+
+* **Deterministic PRNG** (`mulberry32`) with **seed strings** → reproducible runs
+* A suite of **stress seeds**: Hairball, Grid, Scale‑Free (BA), Lattice, Ring‑of‑Cliques, Starburst, Path/Chain, Bipartite Blocks, Noisy Torus
+* **Ticked fuzzers**: evolving snapshots (add/remove nodes/edges, churn knobs) to exercise the renderer and deltas
+* **Watchdogs**:
+
+  * **RAF stall** (main thread) & **Worker ping** (physics/layout) timeouts
+  * **FPS/frametime** meter + rolling stats, **drop‑frame counter**
+  * **Memory sampler** (if supported) & **object count** estimates
+  * **Auto‑actions** on breach: raise toast, flag the HUD red, optionally **capture snapshot** (hooks to 4I), and **freeze fuzzer**
+* **Stress Runner panel**: start/stop, seed, size/density sliders, tick rate, churn %, toggles for rule noise, plus preset buttons
+* **Share**: encodes fuzzer config in URL `#fuzz=...` (base64url) for one‑click repro
+
+---
+
+## 1) `engine/fuzz/prng.ts` (new) — deterministic PRNG helpers
+
+```ts
+// engine/fuzz/prng.ts
+export function hashStr32(s: string){ let h=1779033703^s.length; for (let i=0;i<s.length;i++){ h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = (h<<13) | (h>>>19); } return (h>>>0); }
+export function mulberry32(seed: number){ let t = seed>>>0; return function(){ t|=0; t = (t + 0x6D2B79F5) | 0; let r = Math.imul(t ^ (t>>>15), 1 | t); r ^= r + Math.imul(r ^ (r>>>7), 61 | r); return ((r ^ (r>>>14))>>>0) / 4294967296; }; }
+export function pick<T>(rng:()=>number, arr: T[]): T { return arr[(rng()*arr.length)|0]; }
+export function chance(rng:()=>number, p: number){ return rng() < p; }
+```
+
+---
+
+## 2) `engine/fuzz/seeds.ts` (new) — canonical stress seeds
+
+```ts
+// engine/fuzz/seeds.ts
+import type { ExecutionSnapshot } from '../debugger/graphTypes';
+import { hashStr32, mulberry32, pick, chance } from './prng';
+
+export type SeedConfig = { name: string; nodes: number; density?: number; param?: number; seed: string };
+
+export function hairball(c: SeedConfig): ExecutionSnapshot {
+  const rng = mulberry32(hashStr32(c.seed));
+  const ids = Array.from({length:c.nodes}, (_,i)=>String(i));
+  const monads = ids.map((id,i)=>({ id, neighbors: [] as string[], x: (rng()*2-1)*10, y: (rng()*2-1)*10 }));
+  const p = c.density ?? 0.06;
+  for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++) if (chance(rng, p)) { monads[i].neighbors.push(ids[j]); monads[j].neighbors.push(ids[i]); }
+  return { tick:0, monads, rulesFired: ['Seed'] } as any;
+}
+
+export function grid(c: SeedConfig): ExecutionSnapshot {
+  const n = Math.max(2, Math.round(Math.sqrt(c.nodes))); const ids = [] as string[]; const monads:any[]=[]; let k=0;
+  for (let y=0;y<n;y++) for (let x=0;x<n;x++){ const id=String(k++); ids.push(id); monads.push({ id, neighbors: [] as string[], x:(x-n/2)*30, y:(y-n/2)*30 }); }
+  const get=(x:number,y:number)=> y*n+x;
+  for (let y=0;y<n;y++) for (let x=0;x<n;x++){
+    const i=get(x,y); if (x+1<n){ const j=get(x+1,y); monads[i].neighbors.push(String(j)); monads[j].neighbors.push(String(i)); }
+    if (y+1<n){ const j=get(x,y+1); monads[i].neighbors.push(String(j)); monads[j].neighbors.push(String(i)); }
+  }
+  return { tick:0, monads, rulesFired: ['Grid'] } as any;
+}
+
+export function pathChain(c: SeedConfig): ExecutionSnapshot {
+  const ids = Array.from({length:c.nodes}, (_,i)=>String(i)), monads:any[]=[];
+  for (let i=0;i<ids.length;i++){ monads.push({ id: String(i), neighbors: [] as string[], x: (i - c.nodes/2)*22, y: (Math.sin(i*.3))*12 }); if (i>0){ monads[i-1].neighbors.push(String(i)); monads[i].neighbors.push(String(i-1)); } }
+  return { tick:0, monads, rulesFired: ['Path'] } as any;
+}
+
+export function starburst(c: SeedConfig): ExecutionSnapshot {
+  const ids = Array.from({length:c.nodes-1}, (_,i)=>String(i+1)); const center = '0'; const monads:any[]=[{ id:center, neighbors:[], x:0, y:0 }];
+  for (let i=0;i<ids.length;i++){ const a=ids[i]; const ang = (i/ids.length) * Math.PI*2; const r = 120; const x=Math.cos(ang)*r, y=Math.sin(ang)*r; monads.push({ id:a, neighbors:[center], x, y }); (monads[0].neighbors as string[]).push(a); }
+  return { tick:0, monads, rulesFired: ['Star'] } as any;
+}
+
+export function ringOfCliques(c: SeedConfig): ExecutionSnapshot {
+  const rng = mulberry32(hashStr32(c.seed));
+  const k = Math.max(3, Math.round(c.param ?? 6)); // clique size
+  const m = Math.max(3, Math.round(c.nodes / k));  // number of cliques
+  const monads:any[]=[]; const ids:string[]=[]; let idx=0;
+  const centers:{x:number;y:number}[] = [];
+  for (let i=0;i<m;i++){ const a = (i/m)*Math.PI*2; centers.push({ x: Math.cos(a)*180, y: Math.sin(a)*180 }); }
+  for (let ci=0; ci<m; ci++){
+    const cx=centers[ci].x, cy=centers[ci].y; const cid:string[]=[];
+    for (let j=0;j<k;j++){ const id=String(idx++); ids.push(id); cid.push(id); monads.push({ id, neighbors:[], x: cx + Math.cos((j/k)*Math.PI*2)*(40+rng()*10), y: cy + Math.sin((j/k)*Math.PI*2)*(40+rng()*10) }); }
+    // fully connect clique
+    for (let i=0;i<cid.length;i++) for (let j=i+1;j<cid.length;j++){ const A=cid[i], B=cid[j]; link(monads,A,B); }
+  }
+  // ring connect between cliques
+  for (let ci=0; ci<m; ci++){ const next=(ci+1)%m; const a=String(ci*k), b=String(next*k); link(monads,a,b); }
+  return { tick:0, monads, rulesFired: ['RoC'] } as any;
+}
+
+export function scaleFreeBA(c: SeedConfig): ExecutionSnapshot {
+  const rng = mulberry32(hashStr32(c.seed));
+  const N=c.nodes, m0=Math.max(3, Math.round(c.param??4)), m=Math.max(2, Math.round((c.density??0.06)*10));
+  const monads:any[]=[]; const deg:Record<string,number>={};
+  function addNode(id:string, x:number, y:number){ monads.push({ id, neighbors:[], x, y }); deg[id]=0; }
+  function connect(a:string,b:string){ link(monads,a,b); deg[a]++; deg[b]++; }
+  for (let i=0;i<m0;i++) addNode(String(i), Math.cos(i/m0*6.28)*60, Math.sin(i/m0*6.28)*60);
+  for (let i=0;i<m0;i++) for (let j=i+1;j<m0;j++) connect(String(i), String(j));
+  for (let i=m0;i<N;i++){
+    addNode(String(i), (rng()*2-1)*200, (rng()*2-1)*200);
+    // attach to m existing nodes with prob ~ degree
+    const total = Object.values(deg).reduce((a,b)=>a+b,0) || 1; const picked = new Set<string>();
+    while (picked.size < m){
+      let acc = 0, r = rng()*total; let choice = '0';
+      for (const id in deg){ acc += deg[id]; if (r<=acc){ choice=id; break; } }
+      if (choice !== String(i) && !picked.has(choice)){ connect(String(i), choice); picked.add(choice); }
+    }
+  }
+  return { tick:0, monads, rulesFired: ['BA'] } as any;
+}
+
+function link(monads:any[], A:string, B:string){ const a=monads.find(n=>n.id===A), b=monads.find(n=>n.id===B); if(!a||!b) return; a.neighbors.push(B); b.neighbors.push(A); }
+```
+
+---
+
+## 3) `engine/fuzz/fuzzer.ts` (new) — evolving snapshots
+
+```ts
+// engine/fuzz/fuzzer.ts
+import type { ExecutionSnapshot } from '../debugger/graphTypes';
+import { hashStr32, mulberry32, pick, chance } from './prng';
+
+export type FuzzCfg = {
+  seed: string; base: 'hairball'|'grid'|'path'|'star'|'roc'|'ba';
+  nodes: number; density: number; ticks: number; churn: number; // 0..1 fraction of nodes to consider per tick
+  ruleNoise: number; // 0..1 chance to emit a random rule string
+};
+
+export function runFuzzer(cfg: FuzzCfg, makeBase: (cfg:any)=>ExecutionSnapshot): ExecutionSnapshot[] {
+  const rng = mulberry32(hashStr32(cfg.seed));
+  const base = makeBase({ name: cfg.base, nodes: cfg.nodes, density: cfg.density, param: 6, seed: cfg.seed });
+  const ticks: ExecutionSnapshot[] = [ { ...base, tick: 0 } as any ];
+  let current = clone(base);
+
+  for (let t=1; t<cfg.ticks; t++){
+    // position jitter (simulate motion)
+    for (const id in current.monads){ const m = (current.monads as any)[id]; m.x += (rng()*2-1)*2; m.y += (rng()*2-1)*2; }
+
+    // churn: randomly add/remove edges among a subset
+    const ids = Object.keys(current.monads); const K = Math.max(1, Math.round(ids.length * cfg.churn * 0.5));
+    for (let k=0;k<K;k++){
+      const a = pick(rng, ids), b = pick(rng, ids); if (a===b) continue; const A=(current.monads as any)[a], B=(current.monads as any)[b];
+      const iA = A.neighbors.indexOf(b), iB = B.neighbors.indexOf(a);
+      if (chance(rng, 0.5)) {
+        if (iA<0){ A.neighbors.push(b); B.neighbors.push(a); }
+      } else {
+        if (iA>=0){ A.neighbors.splice(iA,1); B.neighbors.splice(iB,1); }
+      }
+    }
+
+    // rule noise
+    const rules: any[] = [];
+    if (chance(rng, cfg.ruleNoise)) rules.push('Bridge');
+    if (chance(rng, cfg.ruleNoise*0.8)) rules.push('PromotePath');
+    if (chance(rng, cfg.ruleNoise*0.5)) rules.push({ id:'AttachTail', nodes: [pick(rng, ids)], edges: [] });
+
+    current = { ...current, tick: t, rulesFired: rules } as any;
+    ticks.push(clone(current));
+  }
+  return ticks;
+}
+
+function clone(s: ExecutionSnapshot): ExecutionSnapshot { return JSON.parse(JSON.stringify(s)); }
+```
+
+---
+
+## 4) `engine/monitor/watchdog.ts` (new) — RAF & worker heartbeats + stats
+
+```ts
+// engine/monitor/watchdog.ts
+export type WatchdogOpts = { stallMs?: number; workerPingMs?: number; onBreach?: (kind:'raf'|'worker', ms:number)=>void };
+export class Watchdog {
+  private rafId=0; private lastTs=0; private opts: WatchdogOpts; private alive=true; private pinger?: any; private onPing?:()=>void;
+  fps=0; frameMs=0; drops=0; avgFrameMs=0; samples=0; workerLag=0;
+  constructor(opts: WatchdogOpts){ this.opts = { stallMs: 250, workerPingMs: 1500, ...opts }; }
+  start(){ const loop = (ts:number)=>{ if(!this.alive) return; if(this.lastTs){ const dt = ts - this.lastTs; this.frameMs = dt; this.avgFrameMs = (this.avgFrameMs*this.samples + dt)/(this.samples+1); this.samples++; this.fps = 1000/Math.max(1, dt); if (dt > (this.opts.stallMs||250)){ this.drops++; this.opts.onBreach?.('raf', dt); } } this.lastTs = ts; this.rafId = requestAnimationFrame(loop); }; this.rafId = requestAnimationFrame(loop); }
+  stop(){ this.alive=false; cancelAnimationFrame(this.rafId); }
+  bindWorker(port: MessagePort|Worker){ const ping=(port as any).postMessage ? (msg:any)=> (port as any).postMessage(msg) : (_:any)=>{}; const self=this; let last=performance.now(); this.pinger = setInterval(()=>{ const t=performance.now(); ping({ __ping:t }); const timeout=setTimeout(()=>{ self.workerLag = performance.now()-t; self.opts.onBreach?.('worker', self.workerLag); }, this.opts.workerPingMs); this.onPing = ()=>{ clearTimeout(timeout); self.workerLag = performance.now()-t; }; }, Math.max(500, (this.opts.workerPingMs||1500)/2)); return { onPong: ()=> this.onPing?.() };
+  }
+}
+
+export function memoryInfo(){ const p:any = (performance as any); if (p && p.memory){ const { usedJSHeapSize, totalJSHeapSize } = p.memory; return { used: usedJSHeapSize, total: totalJSHeapSize }; } return null; }
+```
+
+> For worker integration, emit `{ __pong:now }` from your worker upon `{ __ping }` receipt.
+
+---
+
+## 5) `playground/components/PerfHUD.tsx` (new) — on‑canvas HUD
+
+```tsx
+// playground/components/PerfHUD.tsx
+import React from 'react';
+import { memoryInfo } from '../../engine/monitor/watchdog';
+
+export const PerfHUD: React.FC<{ stats: { fps:number; frameMs:number; avgFrameMs:number; drops:number; workerLag:number } }>
+= ({ stats }) => {
+  const mem = memoryInfo();
+  const warn = stats.frameMs>50 || stats.workerLag>800;
+  return (
+    <div className={`mpl-hud ${warn?'warn':''}`}>
+      <div>FPS {stats.fps.toFixed(0)} · {stats.frameMs.toFixed(1)}ms (avg {stats.avgFrameMs.toFixed(1)}ms)</div>
+      <div>Drops {stats.drops} · Worker {stats.workerLag.toFixed(0)}ms</div>
+      {mem && <div>Mem {(mem.used/1e6).toFixed(1)}/{(mem.total/1e6).toFixed(1)} MB</div>}
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/components/FuzzPanel.tsx` (new) — config + runner + share
+
+```tsx
+// playground/components/FuzzPanel.tsx
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { hairball, grid, pathChain, starburst, ringOfCliques, scaleFreeBA } from '../../engine/fuzz/seeds';
+import { runFuzzer, FuzzCfg } from '../../engine/fuzz/fuzzer';
+
+const BASES = {
+  hairball, grid, path: pathChain, star: starburst, roc: ringOfCliques, ba: scaleFreeBA
+} as const;
+
+function enc(o:any){ const b=btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); return b; }
+function dec(s:string){ try{ const b=s.replace(/-/g,'+').replace(/_/g,'/'); const pad=b.length%4? '='.repeat(4-(b.length%4)) : ''; return JSON.parse(decodeURIComponent(escape(atob(b+pad)))); }catch{ return null; } }
+
+export const FuzzPanel: React.FC<{
+  onRun: (timeline: ExecutionSnapshot[]) => void;
+}>
+= ({ onRun }) => {
+  const [cfg, setCfg] = React.useState<FuzzCfg>({ seed: 'demo', base:'hairball', nodes: 500, density: 0.04, ticks: 40, churn: 0.15, ruleNoise: 0.4 });
+
+  React.useEffect(()=>{ const m=/#fuzz=([^&]+)/.exec(location.hash); if(m){ const v=dec(m[1]); if(v){ setCfg(v); location.hash = location.hash.replace(/#fuzz=[^&]+/,''); } } }, []);
+
+  function run(){ const baseMaker = BASES[cfg.base]; const tl = runFuzzer(cfg, baseMaker as any); onRun(tl); }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Stress Runner</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row">
+          <label>Seed <input value={cfg.seed} onChange={e=>setCfg({ ...cfg, seed:e.target.value })} style={{ width:140 }} /></label>
+          <label>Base
+            <select value={cfg.base} onChange={e=>setCfg({ ...cfg, base: e.target.value as any })}>
+              <option value="hairball">Hairball</option>
+              <option value="grid">Grid</option>
+              <option value="path">Path/Chain</option>
+              <option value="star">Starburst</option>
+              <option value="roc">Ring‑of‑Cliques</option>
+              <option value="ba">Scale‑Free (BA)</option>
+            </select>
+          </label>
+        </div>
+        <div className="mpl-row">
+          <label>Nodes <input type="number" min={10} max={50000} value={cfg.nodes} onChange={e=>setCfg({ ...cfg, nodes: +e.target.value })} style={{ width:100 }} /></label>
+          <label>Density <input type="number" step={0.01} min={0} max={1} value={cfg.density} onChange={e=>setCfg({ ...cfg, density: +e.target.value })} style={{ width:90 }} /></label>
+          <label>Ticks <input type="number" min={1} max={1000} value={cfg.ticks} onChange={e=>setCfg({ ...cfg, ticks: +e.target.value })} style={{ width:90 }} /></label>
+        </div>
+        <div className="mpl-row">
+          <label>Churn % <input type="range" min={0} max={1} step={0.01} value={cfg.churn} onChange={e=>setCfg({ ...cfg, churn: +e.target.value })} /> <span className="mpl-dim">{Math.round(cfg.churn*100)}%</span></label>
+          <label>Rule noise <input type="range" min={0} max={1} step={0.01} value={cfg.ruleNoise} onChange={e=>setCfg({ ...cfg, ruleNoise: +e.target.value })} /></label>
+        </div>
+        <div className="mpl-row">
+          <button className="mpl-btn" onClick={run}>Run</button>
+          <button className="mpl-btn" onClick={()=>navigator.clipboard.writeText(location.origin+location.pathname+'#fuzz='+enc(cfg))}>Share Config</button>
+        </div>
+        <div className="mpl-dim">Runs are deterministic per seed. Share a config to repro a perf bug.</div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 7) `playground/components/WatchdogPanel.tsx` (new) — controls + breach actions
+
+```tsx
+// playground/components/WatchdogPanel.tsx
+import React from 'react';
+import { Watchdog } from '../../engine/monitor/watchdog';
+
+export const WatchdogPanel: React.FC<{
+  bindWorker?: (cb:(onPong:()=>void)=>void) => void; // optional binding hook to your worker
+  onCapture?: () => void; // optional: hook into 4I capture
+}>
+= ({ bindWorker, onCapture }) => {
+  const [wd] = React.useState(()=> new Watchdog({ stallMs: 300, workerPingMs: 2000, onBreach: (k,ms)=>{ setLast(`${k} ${ms.toFixed(0)}ms`); setWarn(true); if (onCapture) onCapture(); } }));
+  const [stats, setStats] = React.useState({ fps:0, frameMs:0, avgFrameMs:0, drops:0, workerLag:0 });
+  const [warn, setWarn] = React.useState(false);
+  const [last, setLast] = React.useState<string>('—');
+
+  React.useEffect(()=>{ wd.start(); const id=setInterval(()=>{ setStats({ fps: wd.fps, frameMs: wd.frameMs, avgFrameMs: wd.avgFrameMs, drops: wd.drops, workerLag: wd.workerLag }); }, 300); return ()=>{ clearInterval(id); wd.stop(); }; }, []);
+  React.useEffect(()=>{ if (!bindWorker) return; bindWorker((pong)=>{ /* attach a handler */ (window as any).__mpl_on_pong = ()=>pong(); }); }, [bindWorker]);
+
+  return (
+    <div className={`mpl-card ${warn?'warn':''}`}>
+      <div className="mpl-card-h">Watchdogs</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row"><div className="mpl-chip">FPS {stats.fps.toFixed(0)}</div><div className="mpl-chip">Frame {stats.frameMs.toFixed(1)}ms</div><div className="mpl-chip">Avg {stats.avgFrameMs.toFixed(1)}ms</div><div className="mpl-chip">Drops {stats.drops}</div><div className="mpl-chip">Worker {stats.workerLag.toFixed(0)}ms</div></div>
+        <div className="mpl-dim">Last breach: {last}</div>
+        <div className="mpl-row"><button className="mpl-btn" onClick={()=>setWarn(false)}>Clear</button><button className="mpl-btn" onClick={()=>onCapture?.()}>Capture Now</button></div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 8) `playground/components/CanvasPanel.tsx` (update) — wire Fuzzer + Watchdog + HUD
+
+```tsx
+// CanvasPanel.tsx — Stage 4Q wiring (excerpt)
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { GraphCanvas } from './GraphCanvas';
+import { FuzzPanel } from './FuzzPanel';
+import { WatchdogPanel } from './WatchdogPanel';
+import { PerfHUD } from './PerfHUD';
+
+export const CanvasPanel: React.FC<{ timeline: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void; onReplaceTimeline?: (t:ExecutionSnapshot[])=>void }>
+= ({ timeline, index, onIndex, onReplaceTimeline }) => {
+  const [cam, setCam] = React.useState({ x:0,y:0,z:1 });
+  const slim = React.useMemo(() => ensurePositions(toSlim(timeline[Math.max(0, Math.min(index, timeline.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, timeline]);
+  const canvasRef = React.useRef<any>(null);
+
+  // perf HUD stats (polled from RAF watchdog)
+  const [stats, setStats] = React.useState({ fps:0, frameMs:0, avgFrameMs:0, drops:0, workerLag:0 });
+  React.useEffect(()=>{ const id=setInterval(()=>{ const w=(window as any).__mpl_wd; if (w){ setStats({ fps:w.fps, frameMs:w.frameMs, avgFrameMs:w.avgFrameMs, drops:w.drops, workerLag:w.workerLag }); } }, 300); return ()=>clearInterval(id); }, []);
+
+  function runFuzz(tl: ExecutionSnapshot[]){ onReplaceTimeline?.(tl); onIndex?.(0); }
+
+  function capture(){ try{ (window as any).__mpl_capture?.(); } catch {}
+  }
+
+  // Expose a global watchdog instance for HUD polling
+  React.useEffect(()=>{ const { Watchdog } = require('../../engine/monitor/watchdog'); const wd = new Watchdog({}); (window as any).__mpl_wd = wd; wd.start(); return ()=>wd.stop(); }, []);
+
+  return (
+    <div className="mpl-grid" style={{ position:'relative' }}>
+      <div className="mpl-main">
+        <div style={{ position:'relative' }}>
+          <GraphCanvas ref={canvasRef} snapshot={slim} camera={cam} onCamera={setCam} />
+          <div className="mpl-hud-wrap"><PerfHUD stats={stats} /></div>
+        </div>
+      </div>
+      <aside className="mpl-side">
+        <FuzzPanel onRun={runFuzz} />
+        <WatchdogPanel onCapture={capture} />
+      </aside>
+    </div>
+  );
+};
+```
+
+> If you already have a physics/layout **Worker**, wire `Watchdog.bindWorker(worker)` and reply with `postMessage({ __pong: ts })` when `{ __ping: ts }` arrives.
+
+---
+
+## 9) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4Q — perf HUD + warnings */
+.mpl-hud-wrap { position:absolute; top:8px; left:8px; z-index: 20; }
+.mpl-hud { font: 12px ui-monospace, monospace; background: rgba(0,0,0,.55); color:#fff; padding:6px 8px; border-radius:8px; line-height:1.25; border:1px solid rgba(255,255,255,.15); }
+.mpl-hud.warn { background: rgba(190,18,60,.80); }
+
+.mpl-card.warn .mpl-card-h { color:#b91c1c; }
+```
+
+---
+
+## 10) Example — `playground/pages/DebugExample4Q.tsx`
+
+```tsx
+// playground/pages/DebugExample4Q.tsx
+import React, { useMemo, useState } from 'react';
+import { DebuggerPanel } from '../components/DebuggerPanel';
+import { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { hairball } from '../../engine/fuzz/seeds';
+
+export default function DebugExample4Q(){
+  const base = useMemo(()=> hairball({ name:'hair', nodes: 800, density: 0.04, seed:'demo' }), []);
+  const [history, setHistory] = useState<ExecutionSnapshot[]>([{ ...base, tick:0 } as any]);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4Q — Fuzzers + Stress Seeds + Watchdogs</h1>
+      <DebuggerPanel history={history} onReplaceTimeline={setHistory} />
+      <p className="mpl-dim">Use the Stress Runner to generate deterministic heavy cases. Watch the HUD & Watchdogs for stalls; share configs via the **Share Config** button.</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 11) Notes
+
+* **Determinism**: All shuffles/jitter go through the seeded PRNG. A given `(seed, base, nodes, density, churn, ruleNoise)` fully reproduces a run.
+* **Budgets**: When driving 10k+ nodes, consider switching to the **Performance (10k+)** preset (4L) automatically on first drop.
+* **Capture**: Wire the `onCapture` in `WatchdogPanel` to your 4I WebM/PNG capture to auto‑snapshot the failure moment.
+* **Worker pings**: If you don’t have a worker yet, the worker watchdog quietly idles; add the ping/pong when you introduce one.
+* **Backpressure**: For very fast tickers, you can drop fuzzer frames (generate fewer timeline entries) — or lean on 4R (streaming ingest) next.
+* **Memory**: `performance.memory` exists in Chromium; guard elsewhere.
+
+---
+
+## 12) Changelog — Stage 4Q
+
+* New: `engine/fuzz/prng.ts`, `engine/fuzz/seeds.ts`, `engine/fuzz/fuzzer.ts`
+* New: `engine/monitor/watchdog.ts` (RAF/worker watchdog + memory helper)
+* New UI: `PerfHUD.tsx`, `FuzzPanel.tsx`, `WatchdogPanel.tsx`
+* Updated: `CanvasPanel.tsx` (wire stress runner + HUD + watchdogs)
+* Styles: HUD + warning accents
+
+```
+```

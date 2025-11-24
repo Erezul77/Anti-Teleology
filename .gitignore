@@ -83,6 +83,9 @@ dist
 # Gatsby files
 .cache/
 public
+# Exception: Next.js apps need their public folders
+!SpinOAI-Clean/public/
+!Honestra/public/
 
 # Storybook build outputs
 .out

@@ -1,0 +1,310 @@
+# MPL – Stage 2Q (Advanced Batch Analytics: Correlations, PCA, Clustering)
+
+Stage **2Q** layers advanced analytics onto the batch/sweep pipeline so you can **quantify** relationships between rules and outcomes, reduce dimensionality for visualization, and group runs by behavior.
+
+### What’s new
+
+* **Metrics schema** for batch runs (per‑tick + per‑run aggregates)
+* **Correlation matrix** across metrics (Pearson r)
+* **PCA (2D)** projection of runs for scatter plots
+* **K‑means clustering** (k selectable) over PCA space
+* **Dashboard wiring**: new charts + CSV/JSON export of analytics
+
+> 2Q builds on 2M/2N/2P. No engine changes; all analytics run client‑side.
+
+---
+
+## Directory Tree (updated)
+
+```
+MPL-Stage-2/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ runtime/
+│  │  ├─ interpreter.ts
+│  │  ├─ monad.ts
+│  │  ├─ grid.ts
+│  │  └─ topology/
+│  │     └─ index.ts
+│  ├─ debug/
+│  │  └─ trace.ts
+│  ├─ emotional/
+│  │  └─ types.ts
+│  ├─ utils/
+│  │  └─ io.ts
+│  └─ web/
+│     ├─ web-main.ts
+│     ├─ web-multigrid.ts
+│     ├─ detect-main.ts
+│     ├─ dashboard.ts
+│     ├─ sweep.ts
+│     ├─ rulespec.ts
+│     ├─ prng.ts
+│     ├─ session.ts
+│     ├─ colors.ts
+│     └─ analytics.ts      # NEW: correlations, PCA, k-means, exports
+└─ index-2q.html           # NEW: 2Q analytics dashboard entry
+```
+
+Add this script to **package.json**:
+
+```json
+{
+  "scripts": {
+    "dev:2q": "vite --open index-2q.html"
+  }
+}
+```
+
+---
+
+## src/web/analytics.ts (NEW)
+
+```ts
+export type RunSummary = {
+  id: string;                    // run id / rule label
+  rule: string;                  // e.g., "B3/S23"
+  seed: number;
+  steps: number;
+  alive_final: number;
+  density_mean: number;
+  density_std: number;
+  alive_peak: number;
+  survival_ratio: number;        // alive_final / (W*H)
+  features?: Record<string, number>; // extensible
+};
+
+export type Matrix = number[][];
+
+export function mean(xs: number[]): number { return xs.reduce((a,b)=>a+b,0)/(xs.length||1); }
+export function std(xs: number[]): number { const m=mean(xs); return Math.sqrt(mean(xs.map(x=> (x-m)*(x-m) ))); }
+
+export function pearson(x: number[], y: number[]): number {
+  const mx = mean(x), my = mean(y);
+  let num=0, dx=0, dy=0;
+  for (let i=0;i<x.length;i++){ const a=x[i]-mx, b=y[i]-my; num+=a*b; dx+=a*a; dy+=b*b; }
+  return (dx===0||dy===0)? 0 : (num/Math.sqrt(dx*dy));
+}
+
+/** Correlation matrix across columns of a table (keys). */
+export function correlationMatrix(rows: RunSummary[], keys: string[]): Matrix {
+  const cols: Record<string, number[]> = {};
+  for (const k of keys) cols[k] = rows.map(r => (r as any)[k] ?? r.features?.[k] ?? 0);
+  const n = keys.length; const M: Matrix = Array.from({length:n}, ()=> Array(n).fill(0));
+  for (let i=0;i<n;i++) for (let j=i;j<n;j++){
+    const r = pearson(cols[keys[i]], cols[keys[j]]);
+    M[i][j]=M[j][i]=r;
+  }
+  return M;
+}
+
+/** Centered PCA (2 components) via SVD (power method approximation). */
+export function pca2(rows: RunSummary[], keys: string[]): { proj: [number,number][], means: number[], comps: number[][] } {
+  // Build data matrix X (m x n): m = rows, n = features
+  const m = rows.length, n = keys.length;
+  const X = Array.from({length:m}, ()=> Array(n).fill(0));
+  const means = keys.map(k => mean(rows.map(r => (r as any)[k] ?? r.features?.[k] ?? 0)));
+  for (let i=0;i<m;i++) for (let j=0;j<n;j++) X[i][j] = ((rows[i] as any)[keys[j]] ?? rows[i].features?.[keys[j]] ?? 0) - means[j];
+  // Covariance C = (1/(m-1)) X^T X
+  const C: Matrix = Array.from({length:n}, ()=> Array(n).fill(0));
+  for (let i=0;i<n;i++) for (let j=i;j<n;j++){
+    let s=0; for (let k=0;k<m;k++) s += X[k][i]*X[k][j]; s/= (m>1? (m-1):1);
+    C[i][j]=C[j][i]=s;
+  }
+  // Power iteration to get top 2 eigenvectors
+  function powerVec(A: Matrix, iters=50): number[] {
+    let v = Array(A.length).fill(0).map(()=> Math.random());
+    const norm = (u:number[]) => Math.sqrt(u.reduce((a,b)=>a+b*b,0));
+    for (let t=0;t<iters;t++){
+      const u = A.map(row => row.reduce((s, a, j)=> s + a*v[j], 0));
+      const nv = norm(u); v = u.map(x=> x/(nv||1));
+    }
+    return v;
+  }
+  const v1 = powerVec(C, 80);
+  // Deflate C to get v2
+  const lambda1 = v1.reduce((s,vi,i)=> s + vi * (C[i].reduce((t,a,j)=> t + a*v1[j],0)), 0);
+  const C2: Matrix = C.map((row,i)=> row.map((a,j)=> a - lambda1 * v1[i]*v1[j]));
+  const v2 = powerVec(C2, 80);
+  // Project X onto [v1,v2]
+  const proj: [number,number][] = X.map(row => [row.reduce((s,a,j)=> s + a*v1[j],0), row.reduce((s,a,j)=> s + a*v2[j],0)] as [number,number]);
+  return { proj, means, comps: [v1, v2] };
+}
+
+/** K-means over 2D points. */
+export function kmeans(points: [number,number][], k: number, iters=50){
+  if (points.length===0) return { centers: [], labels: [] as number[] };
+  const centers = points.slice(0,k).map(p=>[...p] as [number,number]);
+  const labels = new Array(points.length).fill(0);
+  for (let it=0; it<iters; it++){
+    // assign
+    for (let i=0;i<points.length;i++){
+      const [x,y]=points[i]; let best=0, bd=Infinity;
+      for (let c=0;c<centers.length;c++){ const dx=x-centers[c][0], dy=y-centers[c][1]; const d=dx*dx+dy*dy; if (d<bd){ bd=d; best=c; } }
+      labels[i]=best;
+    }
+    // update
+    const acc = centers.map(()=> [0,0,0]);
+    for (let i=0;i<points.length;i++){ const c=labels[i]; acc[c][0]+=points[i][0]; acc[c][1]+=points[i][1]; acc[c][2]+=1; }
+    for (let c=0;c<centers.length;c++){ const n=acc[c][2]||1; centers[c][0]=acc[c][0]/n; centers[c][1]=acc[c][1]/n; }
+  }
+  return { centers, labels };
+}
+
+/** CSV helpers */
+export function toCSV(rows: any[], header: string[]): string{
+  const esc = (v:any)=> typeof v==='string' && v.includes(',') ? '"'+v.replace(/"/g,'""')+'"' : v;
+  return [header.join(','), ...rows.map(r => header.map(h=> esc(r[h] ?? '')).join(','))].join('\n');
+}
+```
+
+---
+
+## index-2q.html (NEW – analytics dashboard)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 2Q – Advanced Batch Analytics</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 320px 1fr 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    canvas { background:#0a0e11; border:1px solid #1b2227; border-radius:8px; width:100%; height:320px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, select, input { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 2Q (Advanced Batch Analytics)</h1>
+    <small>Correlation • PCA • Clustering • Exports</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <label>Metrics</label>
+        <select id="metricX"></select>
+        <select id="metricY"></select>
+      </div>
+      <div class="row">
+        <label>Clusters (k)</label>
+        <input id="kval" type="number" min="1" max="8" value="3" />
+        <button id="runAnalytics">Run Analytics</button>
+        <button id="exportAnalytics">Export CSV</button>
+      </div>
+      <div class="row">
+        <small id="status"></small>
+      </div>
+    </aside>
+
+    <section class="panel">
+      <h3>Correlation Matrix</h3>
+      <canvas id="corr"></canvas>
+    </section>
+    <section class="panel">
+      <h3>PCA Scatter (k‑means colors)</h3>
+      <canvas id="pca"></canvas>
+    </section>
+  </main>
+  <script type="module">
+    import { correlationMatrix, pca2, kmeans, toCSV } from '/src/web/analytics.ts';
+
+    const corr = document.getElementById('corr').getContext('2d');
+    const pca = document.getElementById('pca').getContext('2d');
+    const status = document.getElementById('status');
+    const metricX = document.getElementById('metricX');
+    const metricY = document.getElementById('metricY');
+    const kval = document.getElementById('kval');
+
+    // Demo data: replace by wiring from your 2M sweeps
+    const runs = [
+      { id:'Life', rule:'B3/S23', seed:1, steps:200, alive_final:120, density_mean:0.18, density_std:0.05, alive_peak:240, survival_ratio:0.12 },
+      { id:'HighLife', rule:'B36/S23', seed:1, steps:200, alive_final:220, density_mean:0.25, density_std:0.04, alive_peak:310, survival_ratio:0.22 },
+      { id:'Seeds', rule:'B2/S', seed:1, steps:200, alive_final:10, density_mean:0.06, density_std:0.02, alive_peak:60, survival_ratio:0.01 },
+    ];
+
+    const keys = ['alive_final','density_mean','density_std','alive_peak','survival_ratio'];
+    for (const k of keys){
+      const o1 = document.createElement('option'); o1.textContent = k; metricX.appendChild(o1);
+      const o2 = document.createElement('option'); o2.textContent = k; metricY.appendChild(o2);
+    }
+    metricX.value = 'alive_final'; metricY.value = 'density_mean';
+
+    function drawMatrix(ctx, M, labels){
+      const w = ctx.canvas.width, h = ctx.canvas.height; const n = M.length;
+      const cellW = w/n, cellH = h/n; ctx.clearRect(0,0,w,h);
+      for (let i=0;i<n;i++) for (let j=0;j<n;j++){
+        const r = M[i][j]; const hue = (r*0.5+0.5)*240; // blue (0)→red(1)
+        ctx.fillStyle = `hsl(${hue},70%,50%)`; ctx.fillRect(j*cellW, i*cellH, cellW, cellH);
+      }
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      for (let k=0;k<=n;k++){ ctx.beginPath(); ctx.moveTo(k*cellW+0.5,0); ctx.lineTo(k*cellW+0.5,h); ctx.stroke(); }
+      for (let k=0;k<=n;k++){ ctx.beginPath(); ctx.moveTo(0,k*cellH+0.5); ctx.lineTo(w,k*cellH+0.5); ctx.stroke(); }
+    }
+
+    function drawScatter(ctx, points, labels){
+      const w = ctx.canvas.width, h = ctx.canvas.height; ctx.clearRect(0,0,w,h);
+      // normalize to viewbox
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+      for (const [x,y] of points){ if(x<minX)minX=x; if(y<minY)minY=y; if(x>maxX)maxX=x; if(y>maxY)maxY=y; }
+      const pad=20, sx=(w-2*pad)/(maxX-minX||1), sy=(h-2*pad)/(maxY-minY||1);
+      for (let i=0;i<points.length;i++){
+        const [x,y]=points[i]; const px=pad+(x-minX)*sx, py=h-(pad+(y-minY)*sy);
+        const c=labels? (labels[i]%6)*60 : 200; ctx.fillStyle=`hsl(${c},70%,60%)`;
+        ctx.beginPath(); ctx.arc(px,py,4,0,Math.PI*2); ctx.fill();
+      }
+    }
+
+    function run(){
+      const M = correlationMatrix(runs, keys); drawMatrix(corr, M, keys);
+      const { proj } = pca2(runs, keys);
+      const k = Math.max(1, Math.min(8, Number(kval.value)||3));
+      const { labels } = kmeans(proj, k, 40);
+      drawScatter(pca, proj, labels);
+      status.textContent = `Computed r-matrix, PCA(2), k-means(k=${k}) over ${runs.length} runs.`;
+    }
+
+    document.getElementById('runAnalytics').onclick = run;
+    document.getElementById('exportAnalytics').onclick = () => {
+      const header = ['id','rule','seed','steps','alive_final','density_mean','density_std','alive_peak','survival_ratio'];
+      const csv = toCSV(runs, header); const blob = new Blob([csv],{type:'text/csv'});
+      const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`analytics-${Date.now()}.csv`; a.click(); URL.revokeObjectURL(a.href);
+    };
+
+    // first paint
+    run();
+  </script>
+</body>
+</html>
+```
+
+---
+
+## README addendum (2Q)
+
+````md
+### 2Q – Advanced Batch Analytics (Correlations, PCA, Clustering)
+
+Run the analytics dashboard:
+```bash
+npm i
+npm run dev:2q
+````
+
+* **Correlation matrix**: inspect relationships between outcome metrics.
+* **PCA scatter**: 2D projection of runs; color by **k‑means** clusters.
+* **Exports**: CSV of run summaries.
+
+**Wire up real data:** feed your 2M sweep results (per‑run aggregates) into `runs` and extend `keys` to include custom metrics.
+
+```
+```

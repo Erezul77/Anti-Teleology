@@ -68,7 +68,7 @@ export default function DeltaATracker({ sessionId, darkMode = true }: DeltaATrac
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center">
               <Image 
-                src="/favicon.gif" 
+                src="/favicon.PNG" 
                 alt="Spino" 
                 width={32} 
                 height={32} 

@@ -1,0 +1,43 @@
+--- a/src/engine/visBridge.ts
++++ b/src/engine/visBridge.ts
+@@ -1,6 +1,7 @@
+ // Minimal bridge between engine state and UI visualization.
+ import { eventBus } from './events';
+
+ export type Snapshot = {
+   size: { x:number; y:number; z:number };
+   channel: Uint8Array; // flattened x-major: i = x + y*sx + z*sx*sy
+   getStateAt?: (x:number,y:number,z:number) => Record<string, any> | undefined;
+ };
+
+ class VisBridge {
+   private provider: (() => Snapshot) | null = null;
+-  private tickVersion = 0;
++  private tickVersion = 0;
++  private overrideSnapshot: Snapshot | null = null;
+
+   setSnapshotProvider(fn: () => Snapshot) {
+     this.provider = fn;
+   }
+
+   hasProvider() { return !!this.provider; }
+
+   getSnapshot(): { version:number; snapshot?: Snapshot } {
+-    return { version: this.tickVersion, snapshot: this.provider?.() };
++    return { version: this.tickVersion, snapshot: this.overrideSnapshot ?? this.provider?.() };
+   }
+
+   constructor() {
+     // Advance a simple version so UI knows when to refresh
+     eventBus.on('tick', () => { this.tickVersion++; });
+     eventBus.on('simulationStop', () => { this.tickVersion++; });
+   }
++
++  setExternalSnapshot(s: Snapshot | null) {
++    this.overrideSnapshot = s;
++    this.tickVersion++;
++  }
+ }
+
+ export const visBridge = new VisBridge();
+ export type { Snapshot as VisSnapshot };

@@ -1,0 +1,23 @@
+--- a/src/engine/events.ts
++++ b/src/engine/events.ts
+@@
+ export type EngineEvents = {
+   tick: { step: number; t: number };
+   stateChange: {
+     pos: VoxelPos;
+     prevState: Record<string, any>;
+     nextState: Record<string, any>;
+     step: number;
+   };
+   ruleApplied: {
+     ruleId: string;
+     pos: VoxelPos;
+     step: number;
+     meta?: Record<string, any>;
+   };
+   simulationStart: { at: number };
+   simulationStop: { at: number };
+   error: { message: string; where?: string; data?: any };
++  rulesReloaded: { at: number; sourceHash: string; byteSize: number };
++  rulesReloadError: { at: number; errors: string[] };
+ };

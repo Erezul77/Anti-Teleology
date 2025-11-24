@@ -1,0 +1,592 @@
+# MPL Playground — Stage 3K Patch (Time‑Travel Scrubber + Ghost Overlay)
+
+This patch implements **time‑travel debugging** across recorded snapshots and a **ghost overlay** for A/B visual comparison between two ticks.
+
+* **Time Scrubber**: slider + play/pause + step + speed + loop.
+* **Ghost Overlay**: pin any tick as **A** and compare with current **B**; faint “ghost” nodes/edges show previous state.
+* **Back‑compatible**: If no history is provided, everything continues to work with a single `snapshot`.
+* **Zero deps**: pure React + SVG.
+
+> **Integrate in this order:** types (no breaking changes) → components → CSS → panel wiring.
+
+---
+
+## 1) `engine/debugger/graphTypes.ts` (superset of 3J; no breaking changes)
+
+```ts
+// engine/debugger/graphTypes.ts
+// Stage 3K — shared graph + snapshot types (unchanged from 3J, listed for clarity)
+
+export type MonadId = string | number;
+
+export interface MonadState {
+  id: MonadId;
+  position?: { x: number; y: number };
+  neighbors?: MonadId[];
+  data?: Record<string, unknown>;
+  active?: boolean;
+}
+
+export interface RuleFire {
+  ruleId: string;
+  at: number;        // tick/time index
+  monadId: MonadId;  // monad affected (required)
+  sourceId?: MonadId; // optional directional metadata
+  targetId?: MonadId;
+  meta?: Record<string, unknown>;
+}
+
+export interface ExecutionSnapshot {
+  tick: number;
+  monads: MonadState[];
+  rulesFired?: RuleFire[];
+  focusMonadId?: MonadId | null;
+}
+
+export interface GraphNode {
+  id: string;
+  label?: string;
+  x: number;
+  y: number;
+  radius: number;
+  active?: boolean;
+  data?: Record<string, unknown>;
+  lastRuleId?: string;
+  lastRuleAt?: number; // tick
+}
+
+export interface GraphEdge {
+  id: string;        // `${source}->${target}` undirected key
+  source: string;
+  target: string;
+  pulse?: { ruleId: string; at: number } | null; // from directional rule
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+```
+
+---
+
+## 2) `engine/debugger/toGraph.ts` (same API as 3J; unchanged except exported function reused)
+
+```ts
+// engine/debugger/toGraph.ts
+// Stage 3K — reuse 3J snapshot→graph conversion w/ rule overlay enrichment
+
+import { ExecutionSnapshot, GraphData, GraphEdge, GraphNode, MonadState } from "./graphTypes";
+
+export interface LayoutOptions { radialFallback?: boolean; nodeRadius?: number; spacing?: number; }
+const DEFAULTS: Required<LayoutOptions> = { radialFallback: true, nodeRadius: 14, spacing: 60 };
+const sid = (id: string | number) => (typeof id === "string" ? id : String(id));
+
+function buildEdges(monads: MonadState[]): GraphEdge[] {
+  const seen = new Set<string>();
+  const edges: GraphEdge[] = [];
+  for (const m of monads) {
+    if (!m.neighbors) continue;
+    for (const n of m.neighbors) {
+      const a = sid(m.id); const b = sid(n);
+      const key = a < b ? `${a}->${b}` : `${b}->${a}`;
+      if (seen.has(key)) continue; seen.add(key);
+      edges.push({ id: key, source: a, target: b, pulse: null });
+    }
+  }
+  return edges;
+}
+
+function radialLayout(monads: MonadState[], spacing: number): { [id: string]: { x: number; y: number } } {
+  const n = monads.length; if (n === 0) return {};
+  const perRing = Math.max(1, Math.round(Math.sqrt(n)));
+  const positions: Record<string, { x: number; y: number }> = {};
+  let ring = 0, placed = 0;
+  while (placed < n) {
+    const remaining = n - placed; const count = Math.min(perRing, remaining);
+    const radius = spacing * (ring + 1);
+    for (let i = 0; i < count; i++) {
+      const angle = (2 * Math.PI * i) / count + (ring % 2 === 1 ? Math.PI / count : 0);
+      const x = Math.cos(angle) * radius; const y = Math.sin(angle) * radius;
+      const m = monads[placed + i]; positions[sid(m.id)] = { x, y };
+    }
+    placed += count; ring++;
+  }
+  return positions;
+}
+
+export function buildGraphFromSnapshot(s: ExecutionSnapshot, opts?: LayoutOptions): GraphData {
+  const o = { ...DEFAULTS, ...(opts || {}) };
+  const nodes: GraphNode[] = [];
+  const hasPositions = s.monads.some(m => !!m.position);
+  const fallbackPositions = hasPositions ? {} : radialLayout(s.monads, o.spacing);
+
+  for (const m of s.monads) {
+    const id = sid(m.id); const pos = m.position || fallbackPositions[id] || { x: 0, y: 0 };
+    nodes.push({ id, label: id, x: pos.x, y: pos.y, radius: o.nodeRadius, active: !!(m.active || (s.focusMonadId != null && sid(s.focusMonadId) === id)), data: m.data || {}, lastRuleId: undefined, lastRuleAt: undefined });
+  }
+
+  const edges = buildEdges(s.monads);
+
+  if (s.rulesFired && s.rulesFired.length) {
+    const latestByNode = new Map<string, { ruleId: string; at: number }>();
+    const edgeIndex = new Map<string, GraphEdge>();
+    for (const e of edges) edgeIndex.set(e.id, e);
+
+    for (const rf of s.rulesFired) {
+      const id = sid(rf.monadId); const prev = latestByNode.get(id);
+      if (!prev || rf.at >= prev.at) latestByNode.set(id, { ruleId: rf.ruleId, at: rf.at });
+      if (rf.sourceId != null && rf.targetId != null) {
+        const a = sid(rf.sourceId); const b = sid(rf.targetId);
+        const key = a < b ? `${a}->${b}` : `${b}->${a}`;
+        const e = edgeIndex.get(key); if (e) e.pulse = { ruleId: rf.ruleId, at: rf.at };
+      }
+    }
+    for (const n of nodes) { const l = latestByNode.get(n.id); if (l) { n.lastRuleId = l.ruleId; n.lastRuleAt = l.at; } }
+  }
+  return { nodes, edges };
+}
+```
+
+---
+
+## 3) `playground/components/GraphStateView.tsx` (add **ghost overlay**)
+
+```tsx
+// playground/components/GraphStateView.tsx
+// Stage 3K — SVG graph renderer w/ rule highlight overlay + ghost overlay
+
+import React, { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { ExecutionSnapshot, GraphData } from "../../engine/debugger/graphTypes";
+import { buildGraphFromSnapshot } from "../../engine/debugger/toGraph";
+
+interface GraphStateViewProps {
+  snapshot: ExecutionSnapshot;         // current (B)
+  ghostSnapshot?: ExecutionSnapshot;   // optional comparison (A)
+  width?: number;
+  height?: number;
+  onSelectMonad?: (id: string) => void;
+  neighborFocusMode?: boolean;
+  highlightRules?: boolean;
+  highlightWindowTicks?: number; // default 3
+}
+
+function useMeasure(ref: React.RefObject<HTMLElement>) {
+  const [size, setSize] = useState<{ width: number; height: number }>({ width: 300, height: 200 });
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const cr = entry.contentRect;
+      setSize({ width: cr.width, height: cr.height });
+    });
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
+}
+
+export const GraphStateView: React.FC<GraphStateViewProps> = ({ snapshot, ghostSnapshot, width, height, onSelectMonad, neighborFocusMode, highlightRules = true, highlightWindowTicks = 3 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const size = useMeasure(containerRef);
+  const W = width ?? size.width ?? 600;
+  const H = height ?? size.height ?? 400;
+
+  const graph: GraphData = useMemo(() => buildGraphFromSnapshot(snapshot, { nodeRadius: 14, spacing: 80 }), [snapshot]);
+  const ghost: GraphData | null = useMemo(() => ghostSnapshot ? buildGraphFromSnapshot(ghostSnapshot, { nodeRadius: 12, spacing: 80 }) : null, [ghostSnapshot]);
+
+  // Pan/Zoom
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number } | null>(null);
+
+  const onWheel = useCallback((e: React.WheelEvent) => { e.preventDefault(); const f = Math.exp(-e.deltaY * 0.001); setZoom(z => Math.min(4, Math.max(0.25, z * f))); }, []);
+  const onMouseDown = useCallback((e: React.MouseEvent) => { dragRef.current = { x: e.clientX, y: e.clientY }; }, []);
+  const onMouseMove = useCallback((e: React.MouseEvent) => { if (!dragRef.current) return; const dx = e.clientX - dragRef.current.x; const dy = e.clientY - dragRef.current.y; dragRef.current = { x: e.clientX, y: e.clientY }; setOffset(o => ({ x: o.x + dx, y: o.y + dy })); }, []);
+  const onMouseUp = useCallback(() => { dragRef.current = null; }, []);
+
+  const neighborSet = useMemo(() => {
+    if (!neighborFocusMode) return null as null | Set<string>;
+    const focusId = snapshot.focusMonadId != null ? String(snapshot.focusMonadId) : (graph.nodes.find(n => n.active)?.id ?? null);
+    if (!focusId) return null; const direct = new Set<string>();
+    for (const e of graph.edges) { if (e.source === focusId) direct.add(e.target); if (e.target === focusId) direct.add(e.source); }
+    direct.add(focusId); return direct;
+  }, [neighborFocusMode, graph, snapshot.focusMonadId]);
+
+  const isRecent = useCallback((at?: number) => {
+    if (at == null) return false; const dt = snapshot.tick - at; return dt >= 0 && dt <= (highlightWindowTicks ?? 3);
+  }, [snapshot.tick, highlightWindowTicks]);
+
+  return (
+    <div ref={containerRef} className="mpl-graph-container" style={{ width: width ? `${width}px` : "100%", height: height ? `${height}px` : "100%" }}>
+      <svg className="mpl-graph-svg" width={W} height={H} onWheel={onWheel} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+        <defs>
+          <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" /></marker>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="coloredBlur" /><feMerge><feMergeNode in="coloredBlur" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+        </defs>
+
+        <g transform={`translate(${W / 2 + offset.x}, ${H / 2 + offset.y}) scale(${zoom})`}>
+          {/* Ghost layer (A) */}
+          {ghost && (
+            <g className="mpl-ghost-layer">
+              {ghost.edges.map(e => {
+                const a = ghost.nodes.find(n => n.id === e.source)!;
+                const b = ghost.nodes.find(n => n.id === e.target)!;
+                return <line key={`g-${e.id}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="mpl-ghost-edge" />;
+              })}
+              {ghost.nodes.map(n => (
+                <g key={`g-${n.id}`} transform={`translate(${n.x}, ${n.y})`} className="mpl-ghost-node">
+                  <circle r={n.radius} className="mpl-ghost-node-circle" />
+                  <text className="mpl-ghost-node-label" y={n.radius + 12} textAnchor="middle">{n.label ?? n.id}</text>
+                </g>
+              ))}
+            </g>
+          )}
+
+          {/* Current layer (B) — edges then nodes */}
+          {graph.edges.map(e => {
+            const a = graph.nodes.find(n => n.id === e.source)!; const b = graph.nodes.find(n => n.id === e.target)!;
+            const dimmed = neighborSet && !(neighborSet.has(a.id) && neighborSet.has(b.id));
+            const pulsing = !!(highlightRules && e.pulse && isRecent(e.pulse.at));
+            return (
+              <line key={e.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className={`mpl-edge ${dimmed ? "mpl-dim" : ""} ${pulsing ? "mpl-edge-pulse" : ""}`} />
+            );
+          })}
+
+          {graph.nodes.map(n => {
+            const dimmed = neighborSet && !neighborSet.has(n.id);
+            const fired = !!(highlightRules && isRecent(n.lastRuleAt));
+            return (
+              <g key={n.id} transform={`translate(${n.x}, ${n.y})`} className="mpl-node" onClick={() => onSelectMonad?.(n.id)}>
+                <circle r={n.radius} className={`mpl-node-circle ${n.active ? "mpl-node-active" : ""} ${dimmed ? "mpl-dim" : ""} ${fired ? "mpl-node-fired" : ""}`} filter={(n.active || fired) ? "url(#glow)" : undefined} />
+                <text className={`mpl-node-label ${dimmed ? "mpl-dim" : ""}`} y={n.radius + 14} textAnchor="middle">{n.label ?? n.id}</text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+    </div>
+  );
+};
+```
+
+---
+
+## 4) `playground/components/StateViewer.tsx` (accept **ghostSnapshot**)
+
+```tsx
+// playground/components/StateViewer.tsx
+// Stage 3K — State viewer with Table | Graph toggle + rule highlight controls + ghost prop
+
+import React, { useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { GraphStateView } from "./GraphStateView";
+
+interface StateViewerProps {
+  snapshot: ExecutionSnapshot;           // current (B)
+  ghostSnapshot?: ExecutionSnapshot;     // optional (A)
+  onSelectMonad?: (id: string) => void;
+}
+
+type ViewMode = "table" | "graph";
+
+export const StateViewer: React.FC<StateViewerProps> = ({ snapshot, ghostSnapshot, onSelectMonad }) => {
+  const [mode, setMode] = useState<ViewMode>("table");
+  const [neighborOnly, setNeighborOnly] = useState(false);
+  const [showHighlights, setShowHighlights] = useState(true);
+  const [windowTicks, setWindowTicks] = useState(3);
+
+  const rows = useMemo(() => snapshot.monads.map(m => ({ id: String(m.id), neighbors: m.neighbors?.length ?? 0, active: !!(m.active || (snapshot.focusMonadId != null && String(snapshot.focusMonadId) === String(m.id))) })), [snapshot]);
+
+  return (
+    <div className="mpl-state-viewer">
+      <div className="mpl-toolbar">
+        <div className="mpl-seg">
+          <button className={`mpl-btn ${mode === "table" ? "active" : ""}`} onClick={() => setMode("table")}>Table</button>
+          <button className={`mpl-btn ${mode === "graph" ? "active" : ""}`} onClick={() => setMode("graph")}>Graph</button>
+        </div>
+        {mode === "graph" && (
+          <div className="mpl-toolbar-right">
+            <label className="mpl-check"><input type="checkbox" checked={neighborOnly} onChange={e => setNeighborOnly(e.target.checked)} /> Neighbor focus</label>
+            <label className="mpl-check"><input type="checkbox" checked={showHighlights} onChange={e => setShowHighlights(e.target.checked)} /> Rule highlights</label>
+            <label className="mpl-check">Window
+              <select value={windowTicks} onChange={e => setWindowTicks(parseInt(e.target.value))}>
+                <option value={1}>1</option><option value={3}>3</option><option value={5}>5</option><option value={10}>10</option>
+              </select> ticks
+            </label>
+          </div>
+        )}
+      </div>
+
+      {mode === "table" ? (
+        <div className="mpl-table-wrap">
+          <table className="mpl-table">
+            <thead><tr><th>ID</th><th>Neighbors</th><th>Active</th></tr></thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id} onClick={() => onSelectMonad?.(r.id)} className={r.active ? "mpl-row-active" : undefined}>
+                  <td>{r.id}</td><td>{r.neighbors}</td><td>{r.active ? "●" : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="mpl-graph-wrap">
+          <GraphStateView
+            snapshot={snapshot}
+            ghostSnapshot={ghostSnapshot}
+            onSelectMonad={onSelectMonad}
+            neighborFocusMode={neighborOnly}
+            highlightRules={showHighlights}
+            highlightWindowTicks={windowTicks}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/components/TimeScrubber.tsx` (new)
+
+```tsx
+// playground/components/TimeScrubber.tsx
+// Stage 3K — timeline slider with play/pause, step, speed, loop, and ghost pinning
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+interface TimeScrubberProps {
+  timeline: ExecutionSnapshot[];      // sorted ascending by tick (index 0..N-1)
+  index: number;                      // current index into timeline
+  onChangeIndex: (i: number) => void; // callback when index changes
+  ghostIndex: number | null;          // pinned ghost index (A), or null
+  onChangeGhostIndex: (i: number | null) => void;
+}
+
+export const TimeScrubber: React.FC<TimeScrubberProps> = ({ timeline, index, onChangeIndex, ghostIndex, onChangeGhostIndex }) => {
+  const N = timeline.length;
+  const min = 0, max = Math.max(0, N - 1);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1); // 0.25,0.5,1,2,4
+  const [loop, setLoop] = useState(true);
+  const timerRef = useRef<number | null>(null);
+
+  // Clamp index when timeline grows/shrinks
+  useEffect(() => { if (index > max) onChangeIndex(max); }, [N]);
+
+  // Playback loop
+  useEffect(() => {
+    if (!playing) return;
+    const baseMs = 600; // 1x speed = 600ms per tick
+    const ms = baseMs / (speed || 1);
+    const id = window.setInterval(() => {
+      onChangeIndex((i => {
+        const next = i + 1;
+        if (next <= max) return next;
+        return loop ? min : max;
+      })(index));
+    }, ms);
+    timerRef.current = id as unknown as number;
+    return () => { if (timerRef.current) window.clearInterval(timerRef.current); timerRef.current = null; };
+  }, [playing, speed, index, max, loop, onChangeIndex]);
+
+  const tick = timeline[index]?.tick ?? index;
+  const aTick = ghostIndex != null ? (timeline[ghostIndex]?.tick ?? ghostIndex) : null;
+
+  return (
+    <div className="mpl-timescrubber">
+      <div className="mpl-ts-row">
+        <div className="mpl-ts-controls">
+          <button className="mpl-btn" onClick={() => onChangeIndex(min)} title="Start">⏮</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(Math.max(min, index - 1))} title="Step back">◀</button>
+          <button className="mpl-btn" onClick={() => setPlaying(p => !p)} title={playing ? "Pause" : "Play"}>{playing ? "⏸" : "▶"}</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(Math.min(max, index + 1))} title="Step forward">▶</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(max)} title="End">⏭</button>
+        </div>
+        <div className="mpl-ts-speed">
+          <label>Speed
+            <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))}>
+              <option value={0.25}>0.25×</option>
+              <option value={0.5}>0.5×</option>
+              <option value={1}>1×</option>
+              <option value={2}>2×</option>
+              <option value={4}>4×</option>
+            </select>
+          </label>
+          <label className="mpl-check"><input type="checkbox" checked={loop} onChange={e => setLoop(e.target.checked)} /> Loop</label>
+        </div>
+      </div>
+
+      <div className="mpl-ts-slider">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={1}
+          value={index}
+          onChange={e => onChangeIndex(parseInt(e.target.value))}
+        />
+        <div className="mpl-ts-meta">
+          <span>Index: {index}/{max}</span>
+          <span>Tick: {tick}</span>
+        </div>
+      </div>
+
+      <div className="mpl-ts-ghost">
+        <div className="mpl-ts-ghost-controls">
+          <button className="mpl-btn" onClick={() => onChangeGhostIndex(index)} title="Pin A here">📌 Pin A</button>
+          <button className="mpl-btn" onClick={() => onChangeGhostIndex(null)} title="Clear A">✖ Clear</button>
+        </div>
+        <div className="mpl-ts-ghost-info">
+          <span>A: {ghostIndex != null ? `${ghostIndex}/${max}` : "—"}</span>
+          <span>{aTick != null ? `Tick ${aTick}` : ""}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/components/DebuggerPanel.tsx` (wire history + scrubber)
+
+```tsx
+// playground/components/DebuggerPanel.tsx
+// Stage 3K — Debugger panel with optional history & time-scrubber
+
+import React, { useEffect, useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { StateViewer } from "./StateViewer";
+import { TimeScrubber } from "./TimeScrubber";
+
+interface DebuggerPanelProps {
+  /** Provide either a live snapshot or a full history (preferred for 3K). */
+  snapshot?: ExecutionSnapshot;               // fallback single view
+  history?: ExecutionSnapshot[];              // sorted by tick
+  onFocusMonad?: (id: string) => void;
+}
+
+export const DebuggerPanel: React.FC<DebuggerPanelProps> = ({ snapshot, history, onFocusMonad }) => {
+  const hasHistory = !!(history && history.length);
+  const [idx, setIdx] = useState(() => (hasHistory ? Math.max(0, history!.length - 1) : 0));
+  useEffect(() => { if (hasHistory) setIdx(Math.max(0, history!.length - 1)); }, [hasHistory, history?.length]);
+
+  const [ghostIdx, setGhostIdx] = useState<number | null>(null);
+
+  const current = useMemo<ExecutionSnapshot | undefined>(() => hasHistory ? history![Math.max(0, Math.min(idx, history!.length - 1))] : snapshot, [hasHistory, history, idx, snapshot]);
+  const ghost = useMemo<ExecutionSnapshot | undefined>(() => {
+    if (!hasHistory || ghostIdx == null) return undefined;
+    return history![Math.max(0, Math.min(ghostIdx, history!.length - 1))];
+  }, [hasHistory, ghostIdx, history]);
+
+  return (
+    <div className="mpl-debugger-panel">
+      {/* ... existing run/step/breakpoint controls can remain above ... */}
+
+      {hasHistory && (
+        <section className="mpl-section">
+          <header className="mpl-section-h">Timeline</header>
+          <TimeScrubber
+            timeline={history!}
+            index={idx}
+            onChangeIndex={setIdx}
+            ghostIndex={ghostIdx}
+            onChangeGhostIndex={setGhostIdx}
+          />
+        </section>
+      )}
+
+      <section className="mpl-section">
+        <header className="mpl-section-h">State</header>
+        {current ? (
+          <StateViewer snapshot={current} ghostSnapshot={ghost} onSelectMonad={onFocusMonad} />
+        ) : (
+          <div className="mpl-empty">No snapshot available</div>
+        )}
+      </section>
+    </div>
+  );
+};
+```
+
+---
+
+## 7) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 3K — Time scrubber + ghost overlay */
+.mpl-timescrubber { display: grid; gap: 10px; }
+.mpl-ts-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mpl-ts-controls { display: inline-flex; gap: 6px; }
+.mpl-ts-speed { display: inline-flex; align-items: center; gap: 12px; }
+.mpl-ts-slider input[type=range] { width: 100%; }
+.mpl-ts-meta { display: flex; justify-content: space-between; font-size: 12px; color: #555; margin-top: 4px; }
+.mpl-ts-ghost { display: flex; align-items: center; justify-content: space-between; }
+.mpl-ts-ghost-controls { display: inline-flex; gap: 8px; }
+.mpl-ts-ghost-info { display: inline-flex; gap: 10px; font-size: 12px; color: #555; }
+
+/* Ghost layer styling */
+.mpl-ghost-layer { opacity: 0.35; }
+.mpl-ghost-edge { stroke: #9aa0a6; stroke-width: 1; stroke-dasharray: 4 6; }
+.mpl-ghost-node-circle { fill: #f0f2f5; stroke: #9aa0a6; stroke-width: 1; }
+.mpl-ghost-node-label { font-size: 9px; fill: #6b7280; }
+```
+
+---
+
+## 8) Example: minimal page using history (sanity test)
+
+```tsx
+// playground/pages/DebugExample3K.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3K() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["B"] } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A" } ], focusMonadId: "A" },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B"], active: true }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["B"] } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B", sourceId: "B", targetId: "C" } ], focusMonadId: "B" },
+    { tick: 2, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A", "C"], active: true }, { id: "C", neighbors: ["B"] } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" } ], focusMonadId: "B" },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3K — Time Travel & Ghost Overlay</h1>
+      <DebuggerPanel history={history} onFocusMonad={(id) => console.log("focus", id)} />
+    </div>
+  );
+}
+```
+
+---
+
+## 9) Engine wiring tips
+
+* **Producing history**: push `ExecutionSnapshot` each tick after rule application.
+* Ensure **ticks** are monotonic. If you skip numbers, the scrubber uses **index** while displaying real tick.
+* For live runs, append snapshots to the array; the scrubber auto‑extends to new `max`.
+* To limit memory, keep a ring buffer and expose only the visible window to the panel.
+
+---
+
+## 10) Changelog — Stage 3K
+
+* Added **TimeScrubber** component with play/pause, step, speed, loop, and **Pin A** for ghost overlay
+* Extended **GraphStateView** to render a **ghost layer** under the current frame
+* Updated **StateViewer** to accept `ghostSnapshot`
+* Updated **DebuggerPanel** to consume `history` and route `current` + `ghost` to the viewer
+* CSS: new styles for scrubber and ghost visuals
+
+---
+
+## 11) Next (Stage 3L preview)
+
+* **Import/Export sessions**: download/upload `ExecutionSnapshot[]` as JSON
+* **Bookmarks & annotations** per tick (labels + comments)
+* **Diff mode**: color‑coded adds/removes/changes between A and B
+
+Paste these files and you’ll have **time‑travel debugging** with a clean, performant ghost overlay. Ready for **3L** when you are.

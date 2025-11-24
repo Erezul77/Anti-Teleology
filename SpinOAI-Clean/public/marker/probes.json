@@ -1,0 +1,106 @@
+[
+  { "id":"O1","axis":"OrderChaos","engine":"particles","deltaStrength":0.8,
+    "A":{"mode":"orbit","n":20,"noise":0.03,"radius":150,"speed":0.015},
+    "B":{"mode":"brownian","n":20,"noise":0.35,"repel":2.0,"speedMin":0.01,"speedMax":0.04}
+  },
+  { "id":"O2","axis":"OrderChaos","engine":"grid","deltaStrength":0.7,
+    "A":{"distort":0.02,"freq":0.2},
+    "B":{"distort":0.12,"freq":0.5}
+  },
+  { "id":"O3","axis":"OrderChaos","engine":"rings","deltaStrength":0.8,
+    "A":{"pendulum":"stable","period":2.5,"amp":1.0},
+    "B":{"pendulum":"jitter","period":2.5,"amp":1.0,"jitter":0.15}
+  },
+  { "id":"O4","axis":"OrderChaos","engine":"particles","deltaStrength":0.6,
+    "A":{"mode":"raindrops","rate":"poisson","cv":0.3},
+    "B":{"mode":"raindrops","rate":"bursty","cv":1.1}
+  },
+  { "id":"O5","axis":"OrderChaos","engine":"rings","deltaStrength":0.7,
+    "A":{"wave":"single","freq":1.0},
+    "B":{"wave":"dual","freqs":[1.0,1.7]}
+  },
+
+  { "id":"I1","axis":"IntegrationIsolation","engine":"particles","deltaStrength":0.8,
+    "A":{"clusters":2,"merge":true,"alpha":0.5,"mergeSpeed":0.5},
+    "B":{"clusters":2,"merge":false,"repel":3.0,"alpha":0.8}
+  },
+  { "id":"I2","axis":"IntegrationIsolation","engine":"fields","deltaStrength":0.7,
+    "A":{"branches":"converge","bias":0.7},
+    "B":{"branches":"diverge","bias":0.7}
+  },
+  { "id":"I3","axis":"IntegrationIsolation","engine":"fields","deltaStrength":0.6,
+    "A":{"flow":"sink","lines":60},
+    "B":{"flow":"parallel","lines":60}
+  },
+  { "id":"I4","axis":"IntegrationIsolation","engine":"rings","deltaStrength":0.8,
+    "A":{"partials":"harmonic","ratios":[2,1.5]},
+    "B":{"partials":"detuned","ratios":[1.12,1.0]}
+  },
+  { "id":"I5","axis":"IntegrationIsolation","engine":"shapes","deltaStrength":0.7,
+    "A":{"overlap":true,"alpha":0.45},
+    "B":{"overlap":false,"alpha":0.9,"repel":2.0}
+  },
+
+  { "id":"E1","axis":"ExpansionContraction","engine":"rings","deltaStrength":0.8,
+    "A":{"mode":"expand","fade":0.015,"hueShiftPerFrame":3},
+    "B":{"mode":"contract","fade":0.015,"hueShiftPerFrame":-3}
+  },
+  { "id":"E2","axis":"ExpansionContraction","engine":"shapes","deltaStrength":0.7,
+    "A":{"blob":"metaball","volumeRate":0.04},
+    "B":{"blob":"metaball","volumeRate":-0.04,"centerGlow":true}
+  },
+  { "id":"E3","axis":"ExpansionContraction","engine":"rings","deltaStrength":0.6,
+    "A":{"vignette":"opening","luminanceDelta":0.1},
+    "B":{"vignette":"closing","luminanceDelta":0.1}
+  },
+  { "id":"E4","axis":"ExpansionContraction","engine":"particles","deltaStrength":0.8,
+    "A":{"network":"spread","radiusDelta":1.0},
+    "B":{"network":"shrink","radiusDelta":-1.0}
+  },
+  { "id":"E5","axis":"ExpansionContraction","engine":"rings","deltaStrength":0.7,
+    "A":{"spiral":"outward","scalePerFrame":0.003},
+    "B":{"spiral":"inward","scalePerFrame":-0.003,"glow":true}
+  },
+
+  { "id":"H1","axis":"HarmonyDissonance","engine":"rings","deltaStrength":0.7,
+    "A":{"gradient":"smooth","dh":0.2},
+    "B":{"gradient":"steps","dh":5.0,"stepInterval":0.5}
+  },
+  { "id":"H2","axis":"HarmonyDissonance","engine":"rings","deltaStrength":0.8,
+    "A":{"osc":"ratio","r":2.0},
+    "B":{"osc":"ratio","r":1.12}
+  },
+  { "id":"H3","axis":"HarmonyDissonance","engine":"rings","deltaStrength":0.6,
+    "A":{"phase":"aligned","diff":0.0},
+    "B":{"phase":"offset","diff":1.5708}
+  },
+  { "id":"H4","axis":"HarmonyDissonance","engine":"shapes","deltaStrength":0.7,
+    "A":{"symmetryError":0.01},
+    "B":{"symmetryError":0.08}
+  },
+  { "id":"H5","axis":"HarmonyDissonance","engine":"rings","deltaStrength":0.8,
+    "A":{"complement":"crossfade","period":3.0},
+    "B":{"complement":"alternate","period":1.2,"hardCut":true}
+  },
+
+  { "id":"S1","axis":"StillnessMovement","engine":"shapes","deltaStrength":0.7,
+    "A":{"layout":"static","microShimmer":0.002},
+    "B":{"layout":"pan","degPerSec":0.4}
+  },
+  { "id":"S2","axis":"StillnessMovement","engine":"rings","deltaStrength":0.8,
+    "A":{"pendulum":"slow","period":5.0},
+    "B":{"pendulum":"fast","period":2.0}
+  },
+  { "id":"S3","axis":"StillnessMovement","engine":"fields","deltaStrength":0.6,
+    "A":{"fluidVelocity":0.05},
+    "B":{"fluidVelocity":0.4}
+  },
+  { "id":"S4","axis":"StillnessMovement","engine":"rings","deltaStrength":0.7,
+    "A":{"breathPeriod":6.0},
+    "B":{"breathPeriod":2.5}
+  },
+  { "id":"S5","axis":"StillnessMovement","engine":"shapes","deltaStrength":0.8,
+    "A":{"pauseMs":800},
+    "B":{"pauseMs":0}
+  }
+]

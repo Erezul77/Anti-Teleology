@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p src/engine src/ui/state src/ui/components src/ui/utils src/env scripts
+
+# README
+cat > README-STAGE-1Z.md <<'EOF'
+# Stage 1Z — Packaging & Diagnostics
+
+Final polish for the MPL Playground bundle: a **Diagnostics** console, **centralized logging**, basic **health stats**, **global error capture**, and a small **packaging script** to produce a distributable archive of your web app.
+
+What’s included:
+- src/engine/logger.ts — centralized logger (ring buffer, levels, optional console intercept).
+- src/engine/health.ts — tick FPS, dt, last step, per-tick counters, error tally via eventBus.
+- src/ui/state/logStore.tsx — React provider, filters, export.
+- src/ui/components/DiagnosticsPanel.tsx — build info, UA/GPU, FPS, errors, filters, Download logs.
+- src/ui/components/LogConsole.tsx — tailing console view.
+- src/ui/utils/captureErrors.ts — global error + unhandled rejection capture.
+- src/env/buildInfo.ts — __MPL_BUILD_*__ globals → UI badges.
+- scripts/create-dist.mjs — zips dist/ (falls back to tar.gz).
+- package.json.patch — sample scripts (build, pack, diagnose).
+EOF
+
+# package.json.patch
+cat > package.json.patch <<'EOF'
+--- a/package.json
++++ b/package.json
+@@
+ {
+   "scripts": {
+-    "build": "vite build"
++    "build": "vite build",
++    "pack": "node scripts/create-dist.mjs",
++    "diagnose": "node -e \"console.log('env:', process.version, process.platform)\""
+   }
+ }
+EOF
+
+# src/engine/logger.ts
+cat > src/engine/logger.ts <<'EOF'
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type LogEntry = {
+  t: number;                 // epoch ms
+  level: LogLevel;
+  tag?: string;
+  msg: string;
+  data?: any;
+};
+
+type Listener = (e: LogEntry) => void;
+
+class Logger {
+  private buf: LogEntry[] = [];
+  private cap = 5000;
+  private listeners = new Set<Listener>();
+  private consoleIntercept = false;
+
+  setCapacity(n: number) { this.cap = Math.max(100, n|0); }
+  on(fn: Listener) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+  all() { return this.buf.slice(); }
+
+  private push(e: LogEntry) {
+    this.buf.push(e);
+    if (this.buf.length > this.cap) this.buf.splice(0, this.buf.length - this.cap);
+    this.listeners.forEach(fn => fn(e));
+  }
+
+  log(level: LogLevel, msg: string, data?: any, tag?: string) {
+    const entry: LogEntry = { t: Date.now(), level, msg, data, tag };
+    this.push(entry);
+  }
+  debug(msg: string, data?: any, tag?: string) { this.log('debug', msg, data, tag); }
+  info(msg: string, data?: any, tag?: string) { this.log('info', msg, data, tag); }
+  warn(msg: string, data?: any, tag?: string) { this.log('warn', msg, data, tag); }
+  error(msg: string, data?: any, tag?: string) { this.log('error', msg, data, tag); }
+
+  clear() { this.buf = []; }
+
+  installConsoleIntercept() {
+    if (this.consoleIntercept) return;
+    this.consoleIntercept = true;
+    const orig = { ...console } as any;
+    const wrap = (level: keyof Console, l: LogLevel) => (...args: any[]) => {
+      try {
+        const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+        this.log(l, msg, undefined, 'console');
+      } catch {}
+      return (orig[level] as any)(...args);
+    };
+    console.log = wrap('log', 'info');
+    console.info = wrap('info', 'info');
+    console.warn = wrap('warn', 'warn');
+    console.error = wrap('error', 'error');
+  }
+}
+
+export const logger = new Logger();
+EOF
+
+# src/engine/health.ts
+cat > src/engine/health.ts <<'EOF'
+import { eventBus } from './events';
+import { logger } from './logger';
+
+export type HealthSnapshot = {
+  ticks: number;
+  fpsInstant: number;
+  fpsEMA: number;
+  dtMs: number;
+  lastStep: number;
+  stateChangesLastTick: number;
+  ruleAppliedLastTick: number;
+  errors: number;
+};
+
+class Health {
+  private ticks = 0;
+  private lastT: number | null = null;
+  private fpsEMA = 0;
+  private alpha = 0.2;
+  private lastStep = 0;
+  private dtMs = 0;
+  private stateChanges = 0;
+  private ruleApplied = 0;
+  private errors = 0;
+
+  constructor() {
+    eventBus.on('tick', ({ step, t }) => {
+      this.ticks++;
+      this.lastStep = step;
+      if (this.lastT != null) {
+        this.dtMs = Math.max(0, t - this.lastT);
+        const fps = this.dtMs > 0 ? 1000 / this.dtMs : 0;
+        this.fpsEMA = this.fpsEMA ? (this.alpha * fps + (1 - this.alpha) * this.fpsEMA) : fps;
+      }
+      this.lastT = t;
+    });
+    eventBus.on('stateChange', () => { this.stateChanges++; });
+    eventBus.on('ruleApplied', () => { this.ruleApplied++; });
+    eventBus.on('error', (e) => { this.errors++; logger.error(e.message || 'engine error', e.data, 'engine'); });
+  }
+
+  snapshot(): HealthSnapshot {
+    const fpsInstant = this.dtMs > 0 ? 1000 / this.dtMs : 0;
+    const snap: HealthSnapshot = {
+      ticks: this.ticks,
+      fpsInstant,
+      fpsEMA: this.fpsEMA,
+      dtMs: this.dtMs,
+      lastStep: this.lastStep,
+      stateChangesLastTick: this.stateChanges,
+      ruleAppliedLastTick: this.ruleApplied,
+      errors: this.errors,
+    };
+    // reset per-tick counters
+    this.stateChanges = 0;
+    this.ruleApplied = 0;
+    return snap;
+  }
+}
+
+export const health = new Health();
+EOF
+
+# src/ui/state/logStore.tsx
+cat > src/ui/state/logStore.tsx <<'EOF'
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { logger, type LogEntry, type LogLevel } from '../../engine/logger';
+
+type Ctx = {
+  logs: LogEntry[];
+  level: LogLevel | 'all';
+  setLevel: (l: Ctx['level']) => void;
+  tag: string;
+  setTag: (t: string) => void;
+  search: string;
+  setSearch: (s: string) => void;
+  clear: () => void;
+  download: () => void;
+};
+
+const C = createContext<Ctx | null>(null);
+
+export function LogProvider({ children }: { children: React.ReactNode }) {
+  const [logs, setLogs] = useState<LogEntry[]>(logger.all());
+  const [level, setLevel] = useState<LogLevel | 'all'>('all');
+  const [tag, setTag] = useState<string>('');
+  const [search, setSearch] = useState<string>('');
+
+  useEffect(() => {
+    const off = logger.on((e) => setLogs((prev) => [...prev, e]));
+    return () => off();
+  }, []);
+
+  const download = () => {
+    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `mpl-logs-${Date.now()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const value: Ctx = {
+    logs, level, setLevel, tag, setTag, search, setSearch,
+    clear: () => setLogs([]),
+    download,
+  };
+
+  return <C.Provider value={value}>{children}</C.Provider>;
+}
+
+export function useLogs() {
+  const ctx = useContext(C);
+  if (!ctx) throw new Error('useLogs must be used within LogProvider');
+  return ctx;
+}
+EOF
+
+# src/ui/components/DiagnosticsPanel.tsx
+cat > src/ui/components/DiagnosticsPanel.tsx <<'EOF'
+import React, { useEffect, useMemo, useState } from 'react';
+import { useLogs } from '../state/logStore';
+import { health } from '../../engine/health';
+import { BUILD } from '../../env/buildInfo';
+
+type GpuInfo = { vendor?: string; renderer?: string; };
+
+export default function DiagnosticsPanel() {
+  const { logs, level, setLevel, tag, setTag, search, setSearch, clear, download } = useLogs();
+  const [fps, setFps] = useState({ instant: 0, ema: 0 });
+  const [gpu, setGpu] = useState<GpuInfo>({});
+  const [errCount, setErrCount] = useState(0);
+  const [simStep, setSimStep] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const h = health.snapshot();
+      setFps({ instant: Math.round(h.fpsInstant*10)/10, ema: Math.round(h.fpsEMA*10)/10 });
+      setErrCount(h.errors);
+      setSimStep(h.lastStep);
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')) as any;
+      if (gl) {
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info') as any;
+        const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+        const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        setGpu({ vendor: String(vendor || ''), renderer: String(renderer || '') });
+      }
+    } catch {}
+  }, []);
+
+  const filtered = useMemo(() => logs.filter(l => {
+    const okLevel = level === 'all' || l.level === level;
+    const okTag = !tag || l.tag === tag;
+    const okSearch = !search || (l.msg?.toLowerCase().includes(search.toLowerCase()));
+    return okLevel && okTag && okSearch;
+  }), [logs, level, tag, search]);
+
+  return (
+    <div className="p-3 rounded-xl bg-neutral-900 text-neutral-100 shadow space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-xs opacity-80">Diagnostics</div>
+        <BuildBadge />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <InfoRow label="FPS (EMA)" value={fps.ema.toFixed(1)} />
+        <InfoRow label="FPS (inst)" value={fps.instant.toFixed(1)} />
+        <InfoRow label="Errors" value={String(errCount)} />
+        <InfoRow label="Sim step" value={String(simStep)} />
+        <InfoRow label="User Agent" value={navigator.userAgent} />
+        <InfoRow label="GPU" value={`${gpu.vendor || 'n/a'} — ${gpu.renderer || ''}`} />
+      </div>
+
+      <div className="rounded-lg bg-neutral-800 p-2 text-xs grid grid-cols-6 gap-2 items-center">
+        <label className="opacity-70">Level</label>
+        <select className="bg-neutral-700 rounded px-2 py-1" value={level} onChange={(e)=>setLevel(e.target.value as any)}>
+          <option value="all">all</option>
+          <option value="debug">debug</option>
+          <option value="info">info</option>
+          <option value="warn">warn</option>
+          <option value="error">error</option>
+        </select>
+        <label className="opacity-70">Tag</label>
+        <input className="bg-neutral-700 rounded px-2 py-1" value={tag} onChange={(e)=>setTag(e.target.value)} placeholder="console/engine/etc" />
+        <label className="opacity-70">Search</label>
+        <input className="bg-neutral-700 rounded px-2 py-1" value={search} onChange={(e)=>setSearch(e.target.value)} placeholder="text" />
+      </div>
+
+      <div className="flex items-center gap-2 text-xs">
+        <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700" onClick={download}>Download logs</button>
+        <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700" onClick={clear}>Clear</button>
+      </div>
+
+      <div className="rounded-lg bg-neutral-800 p-2 text-[11px] font-mono max-h-40 overflow-auto">
+        {filtered.slice(-200).map((e, i) => (
+          <div key={i}>
+            <span className="opacity-50 mr-1">{new Date(e.t).toLocaleTimeString()}</span>
+            <span className="mr-1">[{e.level}]</span>
+            {e.tag ? <span className="opacity-70 mr-1">({e.tag})</span> : null}
+            <span>{e.msg}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="text-[11px] opacity-70">
+        Tip: Call <code>logger.installConsoleIntercept()</code> at boot to mirror <code>console.*</code> into the log.
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded bg-neutral-800 px-2 py-1 flex items-center justify-between">
+      <span className="opacity-70">{label}</span>
+      <span className="font-mono">{value}</span>
+    </div>
+  );
+}
+
+function BuildBadge() {
+  const date = new Date(BUILD.date).toLocaleString();
+  return (
+    <div className="text-[10px] px-2 py-1 rounded bg-neutral-800">
+      v{BUILD.version} · {String(BUILD.commit).slice(0,7)} · {date}
+    </div>
+  );
+}
+EOF
+
+# src/ui/components/LogConsole.tsx
+cat > src/ui/components/LogConsole.tsx <<'EOF'
+import React from 'react';
+import { useLogs } from '../state/logStore';
+
+export default function LogConsole() {
+  const { logs } = useLogs();
+  return (
+    <div className="rounded-xl bg-neutral-900 text-neutral-100 p-2 text-xs max-h-64 overflow-auto">
+      <div className="opacity-70 mb-1">Log Console</div>
+      <div className="font-mono space-y-1">
+        {logs.length === 0 ? <div className="opacity-60">No logs yet.</div> : logs.slice(-300).map((e, i) => (
+          <div key={i} className={cls(e.level)}>
+            <span className="opacity-50 mr-1">{new Date(e.t).toLocaleTimeString()}</span>
+            <span className="mr-1">[{e.level}]</span>
+            {e.tag ? <span className="opacity-70 mr-1">({e.tag})</span> : null}
+            <span>{e.msg}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function cls(level: string) {
+  switch (level) {
+    case 'error': return 'text-red-300';
+    case 'warn': return 'text-amber-300';
+    case 'debug': return 'text-sky-300';
+    default: return '';
+  }
+}
+EOF
+
+# src/ui/utils/captureErrors.ts
+cat > src/ui/utils/captureErrors.ts <<'EOF'
+import { logger } from '../../engine/logger';
+
+export function installGlobalErrorCapture() {
+  if (typeof window === 'undefined') return;
+  if ((window as any).__mpl_err_installed__) return;
+  (window as any).__mpl_err_installed__ = true;
+
+  window.addEventListener('error', (ev: any) => {
+    const msg = ev.message || 'window.error';
+    logger.error(msg, { filename: ev.filename, lineno: ev.lineno, colno: ev.colno }, 'window');
+  });
+
+  window.addEventListener('unhandledrejection', (ev: any) => {
+    const r: any = ev.reason;
+    const msg = (r && r.message) || String(r);
+    logger.error('unhandled rejection: ' + msg, {}, 'window');
+  });
+}
+EOF
+
+# src/env/buildInfo.ts
+cat > src/env/buildInfo.ts <<'EOF'
+export const BUILD = {
+  version: (globalThis as any).__MPL_BUILD_VERSION__ ?? 'dev',
+  commit: (globalThis as any).__MPL_BUILD_COMMIT__ ?? 'unknown',
+  date: (globalThis as any).__MPL_BUILD_DATE__ ?? new Date().toISOString(),
+};
+EOF
+
+# scripts/create-dist.mjs
+cat > scripts/create-dist.mjs <<'EOF'
+#!/usr/bin/env node
+import { execSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+const outDir = 'dist';
+if (!existsSync(outDir)) {
+  console.error(`[pack] ${outDir}/ not found. Run your build first (e.g., npm run build).`);
+  process.exit(1);
+}
+const stamp = new Date().toISOString().replace(/[:]/g,'-').slice(0,19);
+const outBase = `mpl-playground-${stamp}`;
+const outRoot = 'dist-bundles';
+mkdirSync(outRoot, { recursive: true });
+
+function has(cmd) {
+  try { execSync(`${cmd} --version`, { stdio: 'ignore' }); return true; } catch { return false; }
+}
+
+if (has('zip')) {
+  const zip = join(outRoot, `${outBase}.zip`);
+  console.log(`[pack] creating ${zip}`);
+  const res = spawnSync('zip', ['-r', zip, '.'], { cwd: outDir, stdio: 'inherit' });
+  process.exit(res.status ?? 0);
+} else if (has('tar')) {
+  const tgz = join(outRoot, `${outBase}.tar.gz`);
+  console.log(`[pack] creating ${tgz}`);
+  const res = spawnSync('tar', ['-czf', tgz, '.'], { cwd: outDir, stdio: 'inherit' });
+  process.exit(res.status ?? 0);
+} else {
+  console.error('[pack] neither `zip` nor `tar` found. Please install one and retry.');
+  process.exit(2);
+}
+EOF
+
+chmod +x scripts/create-dist.mjs || true
+
+echo "✓ Stage 1Z files written."
+echo "Next: apply package.json.patch manually (or edit scripts), then:"
+echo "   npm run build"
+echo "   node scripts/create-dist.mjs"

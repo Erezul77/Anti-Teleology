@@ -1,0 +1,674 @@
+# MPL Playground — Stage 3T Patch (Vault Diffs + Collections + Batch Replay)
+
+This patch layers **Vault-level tools** on top of 3S: compare two sessions, curate **Collections**, and **Batch Replay** multiple sessions with a simple queue controller. No new deps.
+
+**Highlights**
+
+* **Session Diff**: compare two saved sessions (rules, monads, counts, top deltas)
+* **Collections**: create/tag collections; add/remove sessions; open/export
+* **Batch Replay**: queue sessions (or a collection) and auto-step through each session’s timeline with play/pause, speed, gap, and loop
+
+---
+
+## 1) `engine/debugger/vault.ts` (augment: Collections API)
+
+```ts
+// engine/debugger/vault.ts
+// Stage 3S/3T — Vault + Collections (localStorage)
+
+import { SessionBundle } from "./sessionIO";
+
+export interface VaultSessionMeta {
+  id: string;
+  title: string;
+  tags: string[];
+  createdAt: number;
+  updatedAt: number;
+  ticks: number;
+  ruleCount: number;
+  noteCount: number;
+  annotationCount: number;
+  bookmarkCount: number;
+  color?: string;
+}
+
+export interface VaultSession { meta: VaultSessionMeta; bundle: SessionBundle }
+
+const INDEX_KEY = "mpl_vault_index_v1";
+const SKEY = (id: string) => `mpl_vault_s_${id}`;
+
+function now() { return Date.now(); }
+function genId(p = "vs"){ return `${p}_${now()}_${Math.random().toString(36).slice(2, 8)}`; }
+
+function readIndex(): VaultSessionMeta[] { try { return JSON.parse(localStorage.getItem(INDEX_KEY) || "[]"); } catch { return []; } }
+function writeIndex(idx: VaultSessionMeta[]) { localStorage.setItem(INDEX_KEY, JSON.stringify(idx)); }
+
+function summarize(bundle: SessionBundle, title: string, tags: string[] = []): VaultSessionMeta {
+  const ticks = bundle.history?.length || 0;
+  let ruleCount = 0; for (const s of bundle.history || []) ruleCount += (s.rulesFired?.length || 0);
+  const noteCount = (bundle.monadNotes || []).length;
+  const annotationCount = (bundle.annotations || []).length;
+  const bookmarkCount = (bundle.bookmarks || []).length;
+  const id = genId();
+  const t = now();
+  return { id, title, tags, createdAt: t, updatedAt: t, ticks, ruleCount, noteCount, annotationCount, bookmarkCount };
+}
+
+export const Vault = {
+  list(): VaultSessionMeta[] { return readIndex().sort((a,b) => b.updatedAt - a.updatedAt); },
+  getMeta(id: string): VaultSessionMeta | undefined { return readIndex().find(m => m.id === id); },
+  load(id: string): VaultSession | null { const meta = this.getMeta(id); if (!meta) return null; try { const json = localStorage.getItem(SKEY(id)); if (!json) return null; const bundle = JSON.parse(json) as SessionBundle; return { meta, bundle }; } catch { return null; } },
+  saveNew(bundle: SessionBundle, title: string, tags: string[] = [], color?: string): VaultSessionMeta { const meta = summarize(bundle, title, tags); if (color) meta.color = color; const idx = readIndex(); idx.push(meta); writeIndex(idx); localStorage.setItem(SKEY(meta.id), JSON.stringify(bundle)); return meta; },
+  update(id: string, patch: Partial<VaultSessionMeta>): VaultSessionMeta | null { const idx = readIndex(); const i = idx.findIndex(m => m.id === id); if (i < 0) return null; const meta = { ...idx[i], ...patch, updatedAt: now() } as VaultSessionMeta; idx[i] = meta; writeIndex(idx); return meta; },
+  duplicate(id: string): VaultSessionMeta | null { const vs = this.load(id); if (!vs) return null; const copy = structuredClone(vs.bundle); return this.saveNew(copy, `${vs.meta.title} (copy)`, [...vs.meta.tags]); },
+  remove(id: string): boolean { const idx = readIndex(); const i = idx.findIndex(m => m.id === id); if (i < 0) return false; idx.splice(i, 1); writeIndex(idx); localStorage.removeItem(SKEY(id)); return true; },
+  clearAll(): void { for (const m of readIndex()) localStorage.removeItem(SKEY(m.id)); writeIndex([]); }
+};
+
+// --- Collections ---
+export interface VaultCollection { id: string; title: string; tags: string[]; sessionIds: string[]; createdAt: number; updatedAt: number; color?: string }
+const COL_KEY = "mpl_vault_collections_v1";
+function readCols(): VaultCollection[] { try { return JSON.parse(localStorage.getItem(COL_KEY) || "[]"); } catch { return []; } }
+function writeCols(cols: VaultCollection[]) { localStorage.setItem(COL_KEY, JSON.stringify(cols)); }
+
+export const Collections = {
+  list(): VaultCollection[] { return readCols().sort((a,b) => b.updatedAt - a.updatedAt); },
+  create(title: string, tags: string[] = [], color?: string): VaultCollection { const c: VaultCollection = { id: genId("vc"), title, tags, sessionIds: [], createdAt: now(), updatedAt: now(), color }; const cols = readCols(); cols.push(c); writeCols(cols); return c; },
+  update(id: string, patch: Partial<VaultCollection>): VaultCollection | null { const cols = readCols(); const i = cols.findIndex(c => c.id === id); if (i < 0) return null; cols[i] = { ...cols[i], ...patch, updatedAt: now() }; writeCols(cols); return cols[i]; },
+  remove(id: string): boolean { const cols = readCols(); const i = cols.findIndex(c => c.id === id); if (i < 0) return false; cols.splice(i, 1); writeCols(cols); return true; },
+  addSession(colId: string, sessionId: string) { const cols = readCols(); const i = cols.findIndex(c => c.id === colId); if (i < 0) return; const c = cols[i]; if (!c.sessionIds.includes(sessionId)) c.sessionIds.push(sessionId); c.updatedAt = now(); writeCols(cols); },
+  removeSession(colId: string, sessionId: string) { const cols = readCols(); const i = cols.findIndex(c => c.id === colId); if (i < 0) return; const c = cols[i]; c.sessionIds = c.sessionIds.filter(id => id !== sessionId); c.updatedAt = now(); writeCols(cols); }
+};
+```
+
+---
+
+## 2) `engine/debugger/sessionSummary.ts` (new)
+
+```ts
+// engine/debugger/sessionSummary.ts
+// Stage 3T — Summaries & tallies for a whole session
+
+import { SessionBundle } from "./sessionIO";
+
+export interface RuleTally { ruleId: string; count: number }
+export interface SessionSummary {
+  ticks: number;
+  ruleEvents: number;
+  rules: RuleTally[];              // sorted desc by count
+  monadsAll: string[];             // union across snapshots
+  monadCount: number;
+}
+
+export function summarizeSession(bundle: SessionBundle): SessionSummary {
+  const ticks = bundle.history?.length || 0;
+  let ruleEvents = 0; const byRule = new Map<string, number>();
+  const monads = new Set<string>();
+  for (const s of bundle.history || []) {
+    for (const m of s.monads || []) monads.add(String(m.id));
+    const fires = s.rulesFired || []; ruleEvents += fires.length; for (const rf of fires) byRule.set(rf.ruleId, (byRule.get(rf.ruleId) || 0) + 1);
+  }
+  const rules = [...byRule.entries()].map(([ruleId, count]) => ({ ruleId, count })).sort((a,b) => b.count - a.count);
+  const monadsAll = [...monads].sort();
+  return { ticks, ruleEvents, rules, monadsAll, monadCount: monadsAll.length };
+}
+```
+
+---
+
+## 3) `engine/debugger/sessionDiff.ts` (new)
+
+```ts
+// engine/debugger/sessionDiff.ts
+// Stage 3T — Compare two sessions via summaries
+
+import { SessionBundle } from "./sessionIO";
+import { summarizeSession, SessionSummary } from "./sessionSummary";
+
+export interface RuleDelta { ruleId: string; a: number; b: number; d: number }
+export interface SessionDiff {
+  A: SessionSummary;
+  B: SessionSummary;
+  monadsOnlyInA: string[];
+  monadsOnlyInB: string[];
+  ruleDeltas: RuleDelta[];        // all rules appearing in A or B
+  jaccardMonads: number;          // |A∩B| / |A∪B|
+}
+
+export function diffSessions(A: SessionBundle, B: SessionBundle): SessionDiff {
+  const a = summarizeSession(A), b = summarizeSession(B);
+  const setA = new Set(a.monadsAll), setB = new Set(b.monadsAll);
+  const onlyA = [...setA].filter(x => !setB.has(x)).sort();
+  const onlyB = [...setB].filter(x => !setA.has(x)).sort();
+  const inter = [...setA].filter(x => setB.has(x));
+  const union = new Set([...setA, ...setB]);
+  const jaccard = union.size ? inter.length / union.size : 1;
+
+  const mapA = new Map(a.rules.map(r => [r.ruleId, r.count] as const));
+  const mapB = new Map(b.rules.map(r => [r.ruleId, r.count] as const));
+  const allRuleIds = new Set<string>([...mapA.keys(), ...mapB.keys()]);
+  const ruleDeltas: RuleDelta[] = [...allRuleIds].map(id => ({ ruleId: id, a: mapA.get(id) || 0, b: mapB.get(id) || 0, d: (mapB.get(id) || 0) - (mapA.get(id) || 0) }));
+  ruleDeltas.sort((x,y) => Math.abs(y.d) - Math.abs(x.d) || y.b - y.a);
+
+  return { A: a, B: b, monadsOnlyInA: onlyA, monadsOnlyInB: onlyB, ruleDeltas, jaccardMonads: jaccard };
+}
+```
+
+---
+
+## 4) `playground/components/VaultCollectionsPanel.tsx` (new)
+
+```tsx
+// playground/components/VaultCollectionsPanel.tsx
+// Stage 3T — Manage Vault Collections
+
+import React, { useMemo, useState } from "react";
+import { Vault, Collections, VaultSessionMeta, VaultCollection } from "../../engine/debugger/vault";
+
+interface VaultCollectionsPanelProps {
+  onOpenSession: (meta: VaultSessionMeta) => void;
+}
+
+export const VaultCollectionsPanel: React.FC<VaultCollectionsPanelProps> = ({ onOpenSession }) => {
+  const [cols, setCols] = useState<VaultCollection[]>(Collections.list());
+  const [filter, setFilter] = useState("");
+  const [title, setTitle] = useState("");
+  const [tags, setTags] = useState("");
+
+  const refresh = () => setCols(Collections.list());
+  const create = () => { Collections.create(title.trim() || `Collection @ ${new Date().toLocaleString()}`, tags.split(",").map(t => t.trim()).filter(Boolean)); setTitle(""); setTags(""); refresh(); };
+
+  const sessions = useMemo(() => Vault.list(), []);
+  const view = useMemo(() => cols.filter(c => { const q = filter.toLowerCase(); return !q || c.title.toLowerCase().includes(q) || c.tags.some(t => t.toLowerCase().includes(q)); }), [cols, filter]);
+
+  const add = (c: VaultCollection, sessId: string) => { Collections.addSession(c.id, sessId); refresh(); };
+  const rem = (c: VaultCollection, sessId: string) => { Collections.removeSession(c.id, sessId); refresh(); };
+
+  return (
+    <div className="mpl-vc">
+      <div className="mpl-vc-bar">
+        <input placeholder="New collection title" value={title} onChange={e => setTitle(e.target.value)} />
+        <input placeholder="Tags (comma)" value={tags} onChange={e => setTags(e.target.value)} />
+        <button className="mpl-btn" onClick={create}>➕ Create</button>
+        <input placeholder="Filter collections" value={filter} onChange={e => setFilter(e.target.value)} />
+        <button className="mpl-btn" onClick={refresh}>↻ Refresh</button>
+      </div>
+
+      {view.map(c => (
+        <div className="mpl-vc-item" key={c.id}>
+          <div className="mpl-vc-head">
+            <div className="mpl-vc-title"><span className="mpl-dot" style={{ background: c.color || "#e0e7ff" }} /> {c.title}</div>
+            <div className="mpl-vc-tags">{c.tags.map(t => <span className="mpl-chip" key={t}>{t}</span>)}</div>
+            <div className="mpl-vc-actions">
+              <button className="mpl-btn" onClick={() => Collections.remove(c.id) && refresh()}>Delete</button>
+            </div>
+          </div>
+          <div className="mpl-vc-body">
+            <div className="mpl-vc-slist">
+              <div className="mpl-vc-sub">Members</div>
+              <ul>
+                {c.sessionIds.map(id => {
+                  const m = sessions.find(s => s.id === id);
+                  if (!m) return null;
+                  return (
+                    <li key={id}><code>{m.title}</code> <small className="mpl-dim">({m.ticks} ticks)</small>
+                      <button className="mpl-btn slim" onClick={() => onOpenSession(m)}>Open</button>
+                      <button className="mpl-btn slim mpl-danger" onClick={() => rem(c, id)}>Remove</button>
+                    </li>
+                  );
+                })}
+                {c.sessionIds.length === 0 && <li className="mpl-dim">No members</li>}
+              </ul>
+            </div>
+            <div className="mpl-vc-sadd">
+              <div className="mpl-vc-sub">Add session</div>
+              <select onChange={e => add(c, e.target.value)} defaultValue="">
+                <option value="" disabled>Pick a session…</option>
+                {sessions.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+      ))}
+      {view.length === 0 && <div className="mpl-empty">No collections yet</div>}
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/components/VaultDiffPanel.tsx` (new)
+
+```tsx
+// playground/components/VaultDiffPanel.tsx
+// Stage 3T — Compare two saved sessions (A vs B)
+
+import React, { useMemo, useState } from "react";
+import { Vault, VaultSessionMeta } from "../../engine/debugger/vault";
+import { diffSessions } from "../../engine/debugger/sessionDiff";
+
+interface VaultDiffPanelProps {
+  onOpenA?: (meta: VaultSessionMeta) => void;
+  onOpenB?: (meta: VaultSessionMeta) => void;
+}
+
+export const VaultDiffPanel: React.FC<VaultDiffPanelProps> = ({ onOpenA, onOpenB }) => {
+  const metas = Vault.list();
+  const [aId, setA] = useState<string>(metas[0]?.id || "");
+  const [bId, setB] = useState<string>(metas[1]?.id || metas[0]?.id || "");
+
+  const A = aId ? Vault.load(aId)?.bundle : null;
+  const B = bId ? Vault.load(bId)?.bundle : null;
+
+  const d = useMemo(() => (A && B) ? diffSessions(A, B) : null, [aId, bId, metas.length]);
+  const metaA = metas.find(m => m.id === aId); const metaB = metas.find(m => m.id === bId);
+
+  return (
+    <div className="mpl-vdiff">
+      <div className="mpl-vdiff-pick">
+        <label>A <select value={aId} onChange={e => setA(e.target.value)}>{metas.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}</select> <button className="mpl-btn" onClick={() => metaA && onOpenA?.(metaA)}>Open A</button></label>
+        <label>B <select value={bId} onChange={e => setB(e.target.value)}>{metas.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}</select> <button className="mpl-btn" onClick={() => metaB && onOpenB?.(metaB)}>Open B</button></label>
+      </div>
+
+      {!d ? <div className="mpl-empty">Pick two sessions</div> : (
+        <div className="mpl-vdiff-grid">
+          <section>
+            <header>Summary</header>
+            <div className="mpl-cards">
+              <div className="mpl-card"><div className="mpl-card-num">{d.A.ticks}</div><div className="mpl-card-label">A ticks</div></div>
+              <div className="mpl-card"><div className="mpl-card-num">{d.B.ticks}</div><div className="mpl-card-label">B ticks</div></div>
+              <div className="mpl-card"><div className="mpl-card-num">{(d.jaccardMonads*100).toFixed(1)}%</div><div className="mpl-card-label">monad overlap</div></div>
+            </div>
+          </section>
+
+          <section>
+            <header>Monads (only in A)</header>
+            {d.monadsOnlyInA.length ? <ul className="mpl-list mono">{d.monadsOnlyInA.map(x => <li key={x}><code>{x}</code></li>)}</ul> : <div className="mpl-empty">—</div>}
+          </section>
+
+          <section>
+            <header>Monads (only in B)</header>
+            {d.monadsOnlyInB.length ? <ul className="mpl-list mono">{d.monadsOnlyInB.map(x => <li key={x}><code>{x}</code></li>)}</ul> : <div className="mpl-empty">—</div>}
+          </section>
+
+          <section className="mpl-span2">
+            <header>Top Rule Deltas</header>
+            <table className="mpl-table">
+              <thead><tr><th>Rule</th><th>A</th><th>B</th><th>Δ (B-A)</th></tr></thead>
+              <tbody>
+                {d.ruleDeltas.slice(0, 20).map(r => <tr key={r.ruleId}><td><code>{r.ruleId}</code></td><td>{r.a}</td><td>{r.b}</td><td className={`delta ${r.d>0?"pos":r.d<0?"neg":""}`}>{r.d}</td></tr>)}
+              </tbody>
+            </table>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/components/BatchReplayPanel.tsx` (new)
+
+```tsx
+// playground/components/BatchReplayPanel.tsx
+// Stage 3T — Replay a queue of sessions; step indices and auto-advance
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Vault, VaultSessionMeta, Collections, VaultCollection } from "../../engine/debugger/vault";
+
+interface BatchReplayPanelProps {
+  currentIndex: number;
+  timelineLength: number;
+  onSetIndex: (i: number) => void;
+  onOpenSessionAt: (meta: VaultSessionMeta, index: number) => void;
+}
+
+export const BatchReplayPanel: React.FC<BatchReplayPanelProps> = ({ currentIndex, timelineLength, onSetIndex, onOpenSessionAt }) => {
+  const [queue, setQueue] = useState<VaultSessionMeta[]>([]);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1); // 1× baseline
+  const [gapMs, setGapMs] = useState(400); // gap between sessions
+  const [loop, setLoop] = useState(true);
+  const [pos, setPos] = useState(0); // which session in queue
+
+  const metas = Vault.list();
+  const cols = Collections.list();
+
+  const addSession = (id: string) => { const m = metas.find(x => x.id === id); if (!m) return; setQueue(q => q.find(y => y.id === id) ? q : [...q, m]); };
+  const addCollection = (cid: string) => { const c = cols.find(x => x.id === cid); if (!c) return; const toAdd = c.sessionIds.map(id => metas.find(m => m.id === id)).filter(Boolean) as VaultSessionMeta[]; setQueue(q => { const ids = new Set(q.map(x => x.id)); const merged = [...q]; for (const m of toAdd) if (!ids.has(m.id)) merged.push(m); return merged; }); };
+  const removeAt = (i: number) => setQueue(q => q.filter((_,k) => k !== i));
+  const move = (i: number, dir: -1|1) => setQueue(q => { const arr = [...q]; const j = i+dir; if (j<0 || j>=arr.length) return arr; const t = arr[i]; arr[i] = arr[j]; arr[j] = t; return arr; });
+
+  const timerRef = useRef<number | null>(null);
+  const stopTimer = () => { if (timerRef.current) window.clearInterval(timerRef.current); timerRef.current = null; };
+
+  useEffect(() => { return () => stopTimer(); }, []);
+
+  useEffect(() => {
+    if (!playing || queue.length === 0) { stopTimer(); return; }
+    const ms = Math.max(100, 600 / (speed || 1));
+    stopTimer();
+    timerRef.current = window.setInterval(() => {
+      if (currentIndex < Math.max(0, timelineLength - 1)) {
+        onSetIndex(currentIndex + 1);
+        return;
+      }
+      // session ended -> advance
+      stopTimer();
+      setTimeout(() => {
+        const nextPos = pos + 1;
+        if (nextPos < queue.length) {
+          setPos(nextPos);
+          onOpenSessionAt(queue[nextPos], 0);
+          // next interval will be set by effect rerun
+          setPlaying(true);
+        } else if (loop) {
+          setPos(0);
+          onOpenSessionAt(queue[0], 0);
+          setPlaying(true);
+        } else {
+          setPlaying(false);
+        }
+      }, gapMs);
+    }, ms) as unknown as number;
+    return () => stopTimer();
+  }, [playing, speed, currentIndex, timelineLength, queue, pos, gapMs]);
+
+  const start = () => { if (queue.length === 0) return; setPlaying(true); if (pos >= queue.length) setPos(0); onOpenSessionAt(queue[pos], currentIndex === 0 ? 0 : currentIndex); };
+  const pause = () => setPlaying(false);
+  const reset = () => { setPlaying(false); setPos(0); if (queue[0]) onOpenSessionAt(queue[0], 0); };
+
+  return (
+    <div className="mpl-batch">
+      <div className="mpl-batch-bar">
+        <select defaultValue="" onChange={e => addSession(e.target.value)}>
+          <option value="" disabled>Add session…</option>
+          {metas.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
+        </select>
+        <select defaultValue="" onChange={e => addCollection(e.target.value)}>
+          <option value="" disabled>Add collection…</option>
+          {cols.map(c => <option key={c.id} value={c.id}>{c.title} ({c.sessionIds.length})</option>)}
+        </select>
+        <label>Speed <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))}><option value={0.5}>0.5×</option><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option></select></label>
+        <label>Gap <input type="number" value={gapMs} onChange={e => setGapMs(parseInt(e.target.value) || 0)} style={{ width: 80 }} /> ms</label>
+        <label className="mpl-check"><input type="checkbox" checked={loop} onChange={e => setLoop(e.target.checked)} /> Loop</label>
+        {!playing ? <button className="mpl-btn" onClick={start}>▶ Play</button> : <button className="mpl-btn" onClick={pause}>⏸ Pause</button>}
+        <button className="mpl-btn" onClick={reset}>⟲ Reset</button>
+      </div>
+
+      <ol className="mpl-batch-queue">
+        {queue.map((m, i) => (
+          <li key={m.id} className={i===pos?"active":undefined}>
+            <span className="mpl-dot" style={{ background: m.color || "#bbf7d0" }} />
+            <span className="mpl-bq-title">{m.title}</span>
+            <small className="mpl-dim">{m.ticks} ticks • {m.ruleCount} rules</small>
+            <button className="mpl-btn slim" onClick={() => move(i, -1)}>↑</button>
+            <button className="mpl-btn slim" onClick={() => move(i, +1)}>↓</button>
+            <button className="mpl-btn slim" onClick={() => onOpenSessionAt(m, 0)}>Open</button>
+            <button className="mpl-btn slim mpl-danger" onClick={() => removeAt(i)}>✕</button>
+          </li>
+        ))}
+        {queue.length === 0 && <li className="mpl-dim">Queue is empty</li>}
+      </ol>
+    </div>
+  );
+};
+```
+
+---
+
+## 7) `playground/components/DebuggerPanel.tsx` (wire Vault Diff + Collections + Batch Replay)
+
+```tsx
+// playground/components/DebuggerPanel.tsx
+// Stage 3T — Wire in Vault-level tools
+
+import React, { useEffect, useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { StateViewer } from "./StateViewer";
+import { TimeScrubber } from "./TimeScrubber";
+import { ImportExportPanel } from "./ImportExportPanel";
+import { Bookmark } from "../../engine/debugger/bookmarks";
+import { BookmarksPanel } from "./BookmarksPanel";
+import { SessionBundle } from "../../engine/debugger/sessionIO";
+import { AnnotationsPanel } from "./AnnotationsPanel";
+import { MonadicNote, SessionAnnotation } from "../../engine/debugger/annotations";
+import { NodeNotesPanel } from "./NodeNotesPanel";
+import { RuleLogPanel } from "./RuleLogPanel";
+import { RuleStatsPanel } from "./RuleStatsPanel";
+import { Breakpoint } from "../../engine/debugger/breakpoints";
+import { BreakpointsPanel } from "./BreakpointsPanel";
+import { WatchesPanel } from "./WatchesPanel";
+import { DiffPanel } from "./DiffPanel";
+import { SessionSearchPanel } from "./SessionSearchPanel";
+import { Watch } from "../../engine/debugger/watch";
+import { Vault, VaultSessionMeta } from "../../engine/debugger/vault";
+import { VaultPanel } from "./VaultPanel";
+import { CrossSearchPanel } from "./CrossSearchPanel";
+import { VaultCollectionsPanel } from "./VaultCollectionsPanel";
+import { VaultDiffPanel } from "./VaultDiffPanel";
+import { BatchReplayPanel } from "./BatchReplayPanel";
+
+interface DebuggerPanelProps { snapshot?: ExecutionSnapshot; history?: ExecutionSnapshot[]; onFocusMonad?: (id: string) => void; }
+
+export const DebuggerPanel: React.FC<DebuggerPanelProps> = ({ snapshot, history, onFocusMonad }) => {
+  const [timeline, setTimeline] = useState<ExecutionSnapshot[]>(() => history ?? (snapshot ? [snapshot] : []));
+  useEffect(() => { if (history && history.length) setTimeline(history); }, [history?.length]);
+  useEffect(() => { if (!history && snapshot) setTimeline([snapshot]); }, [snapshot?.tick]);
+
+  const [idx, setIdx] = useState(() => Math.max(0, timeline.length - 1));
+  useEffect(() => { setIdx(Math.max(0, timeline.length - 1)); }, [timeline.length]);
+
+  const [ghostIdx, setGhostIdx] = useState<number | null>(null);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [annotations, setAnnotations] = useState<SessionAnnotation[]>([]);
+  const [monadNotes, setMonadNotes] = useState<MonadicNote[]>([]);
+  const [selectedMonadId, setSelectedMonadId] = useState<string | null>(null);
+  const [ruleMarks, setRuleMarks] = useState<number[]>([]);
+  const [bpMarks, setBpMarks] = useState<number[]>([]);
+  const [heatStrip, setHeatStrip] = useState<number[] | undefined>(undefined);
+  const [watches, setWatches] = useState<Watch[]>([]);
+  const [searchMarks, setSearchMarks] = useState<number[]>([]);
+  const [breakpoints, setBreakpoints] = useState<Breakpoint[]>([]);
+
+  const current = useMemo<ExecutionSnapshot | undefined>(() => timeline[Math.max(0, Math.min(idx, timeline.length - 1))], [timeline, idx]);
+  const ghost = useMemo<ExecutionSnapshot | undefined>(() => ghostIdx == null ? undefined : timeline[Math.max(0, Math.min(ghostIdx, timeline.length - 1))], [timeline, ghostIdx]);
+
+  const bundleOf = (): SessionBundle => ({ history: timeline, bookmarks, annotations, monadNotes, watches: watches as any, breakpoints } as SessionBundle);
+
+  const loadFromMeta = (m: VaultSessionMeta, jumpTo?: number, searchIdx?: number[]) => {
+    const vs = Vault.load(m.id); if (!vs) return;
+    const b = vs.bundle;
+    setTimeline(b.history || []);
+    setBookmarks(b.bookmarks || []);
+    setAnnotations(b.annotations || []);
+    setMonadNotes(b.monadNotes || []);
+    setWatches((b as any).watches || []);
+    setBreakpoints((b as any).breakpoints || []);
+    const j = Math.max(0, Math.min(jumpTo ?? (b.history?.length ? b.history.length - 1 : 0), (b.history?.length||1)-1));
+    setIdx(j);
+    setGhostIdx(null);
+    if (searchIdx && searchIdx.length) setSearchMarks(searchIdx); else setSearchMarks([]);
+  };
+
+  const onImport = (bundle: SessionBundle) => {
+    setTimeline(bundle.history || []);
+    setBookmarks(bundle.bookmarks || []);
+    setAnnotations(bundle.annotations || []);
+    setMonadNotes(bundle.monadNotes || []);
+    setWatches((bundle as any).watches || []);
+    setBreakpoints((bundle as any).breakpoints || []);
+    setIdx(Math.max(0, (bundle.history?.length || 1) - 1));
+    setGhostIdx(null);
+  };
+
+  return (
+    <div className="mpl-debugger-panel">
+      {/* Session I/O */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Session I/O</header>
+        <ImportExportPanel history={timeline} bookmarks={bookmarks} annotations={annotations} monadNotes={monadNotes} onImport={onImport} />
+      </section>
+
+      {/* Timeline */}
+      {timeline.length > 0 && (
+        <section className="mpl-section">
+          <header className="mpl-section-h">Timeline</header>
+          <TimeScrubber timeline={timeline} index={idx} onChangeIndex={setIdx} ghostIndex={ghostIdx} onChangeGhostIndex={setGhostIdx} bookmarks={bookmarks} annotations={annotations} ruleMarks={ruleMarks} heatValues={heatStrip} bpMarks={bpMarks} searchMarks={searchMarks} />
+        </section>
+      )}
+
+      {/* Vault: Save/Load */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Vault</header>
+        <VaultPanel currentBundle={bundleOf()} onOpenSession={(m) => loadFromMeta(m)} />
+      </section>
+
+      {/* Collections */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Collections</header>
+        <VaultCollectionsPanel onOpenSession={(m) => loadFromMeta(m, 0)} />
+      </section>
+
+      {/* Cross-Session Search */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Cross-Session Search</header>
+        <CrossSearchPanel onOpenSessionAt={(m,i,marks) => loadFromMeta(m, i, marks)} />
+      </section>
+
+      {/* Diff two sessions */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Vault Diff</header>
+        <VaultDiffPanel onOpenA={(m) => loadFromMeta(m, 0)} onOpenB={(m) => loadFromMeta(m, 0)} />
+      </section>
+
+      {/* Batch Replay */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Batch Replay</header>
+        <BatchReplayPanel currentIndex={idx} timelineLength={timeline.length} onSetIndex={setIdx} onOpenSessionAt={(m, i) => loadFromMeta(m, i)} />
+      </section>
+
+      {/* Diffs + Watches + Rule tools */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">State Diffs</header>
+        <DiffPanel ghost={ghost} current={current} indexA={ghostIdx} indexB={idx} />
+      </section>
+      <section className="mpl-section">
+        <header className="mpl-section-h">Watches</header>
+        <WatchesPanel history={timeline} indexB={idx} indexA={ghostIdx} watches={watches} onChange={setWatches} />
+      </section>
+      <section className="mpl-section">
+        <header className="mpl-section-h">Rule Stats</header>
+        <RuleStatsPanel history={timeline} onSelectRuleForHeat={() => {}} onSetHeatWindow={() => {}} onSetHeatNormalize={() => {}} onSetHeatStrip={setHeatStrip} />
+      </section>
+      <section className="mpl-section">
+        <header className="mpl-section-h">Rule Log</header>
+        <RuleLogPanel history={timeline} onGoToIndex={setIdx} onPinGhost={setGhostIdx} onSelectMonad={(id) => { setSelectedMonadId(id); onFocusMonad?.(id); }} onMarksChange={setRuleMarks} />
+      </section>
+
+      {/* Notes/Annotations/Bookmarks */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Node Notes</header>
+        <NodeNotesPanel currentIndex={idx} currentTick={current?.tick ?? idx} selectedMonadId={selectedMonadId ?? undefined} notes={monadNotes} onChange={setMonadNotes} />
+      </section>
+      <section className="mpl-section">
+        <header className="mpl-section-h">Annotations</header>
+        <AnnotationsPanel currentIndex={idx} currentTick={current?.tick ?? idx} maxIndex={Math.max(0, timeline.length - 1)} annotations={annotations} onChange={setAnnotations} onGoToIndex={setIdx} />
+      </section>
+      <section className="mpl-section">
+        <header className="mpl-section-h">Bookmarks</header>
+        <BookmarksPanel currentIndex={idx} currentTick={current?.tick ?? idx} bookmarks={bookmarks} onChange={setBookmarks} onGoToIndex={setIdx} />
+      </section>
+
+      {/* State */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">State</header>
+        {current ? (
+          <StateViewer history={timeline} index={idx} snapshot={current} ghostSnapshot={ghost} monadNotes={monadNotes.filter(n => n.index === idx)} selectedMonadId={selectedMonadId} onSelectMonad={(id) => { setSelectedMonadId(id); onFocusMonad?.(id); }} />
+        ) : (
+          <div className="mpl-empty">No snapshot available</div>
+        )}
+      </section>
+    </div>
+  );
+};
+```
+
+---
+
+## 8) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 3T — Vault tools */
+.mpl-vc .mpl-vc-bar { display: grid; grid-template-columns: 1fr 1fr auto 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.mpl-vc-item { border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; padding: 8px; margin-bottom: 8px; }
+.mpl-vc-head { display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: 8px; }
+.mpl-vc-title { font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.mpl-vc-body { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+.mpl-vc-sub { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.mpl-vc-slist ul { margin: 0; padding-left: 14px; }
+
+.mpl-vdiff .mpl-vdiff-pick { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.mpl-vdiff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mpl-vdiff-grid .mpl-span2 { grid-column: span 2; }
+.mpl-cards { display: flex; gap: 10px; }
+.delta.pos { color: #065f46; font-weight: 700; }
+.delta.neg { color: #991b1b; font-weight: 700; }
+
+.mpl-batch-bar { display: grid; grid-template-columns: auto auto auto auto auto auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.mpl-batch-queue { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.mpl-batch-queue li { border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; padding: 6px 8px; display: grid; grid-template-columns: 12px 1fr auto auto auto auto auto; align-items: center; gap: 8px; }
+.mpl-batch-queue li.active { box-shadow: 0 0 0 2px #fbbf24 inset; }
+.mpl-bq-title { font-weight: 600; }
+```
+
+---
+
+## 9) Example — `playground/pages/DebugExample3T.tsx`
+
+```tsx
+// playground/pages/DebugExample3T.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3T() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B", "C"] }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["A", "B"] } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B", sourceId: "B", targetId: "C" } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"] }, { id: "C", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" }, { ruleId: "R2", at: 2, monadId: "A", sourceId: "A", targetId: "C" } ] },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3T — Vault Diffs + Collections + Batch Replay</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 10) Notes
+
+* **Scope:** Session Diff summarizes entire runs (not per-tick). For deep diffs, open both sessions and use 3Q’s per-snapshot differ.
+* **Batch Replay:** This ticks indices with a timer separate from the built-in scrubber play; it won’t fight the scrubber since we step the `idx` directly.
+* **Performance:** All vault ops are localStorage-backed; for large bundles, swap `Vault` storage to IndexedDB without changing the API.
+* **Collections:** Stored as a single array `mpl_vault_collections_v1` for simplicity.
+
+---
+
+## 11) Changelog — Stage 3T
+
+* New engine: `sessionSummary.ts`, `sessionDiff.ts`
+* Vault API: **Collections** (create/update/delete, add/remove sessions)
+* New UI: `VaultCollectionsPanel.tsx`, `VaultDiffPanel.tsx`, `BatchReplayPanel.tsx`
+* Updated: `DebuggerPanel.tsx` wiring
+* CSS: collections, diff, batch replay styles
+
+```
+```

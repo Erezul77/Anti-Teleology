@@ -1,0 +1,477 @@
+# MPL – Stage 3E (Profiler + Adaptive Budgets & Bitrate)
+
+Stage **3E** adds a **live performance profiler** and **adaptive controls** that keep simulation, rendering, and streaming smooth under changing load. It builds on 3C (tiled renderer) and 3D (tile streaming).
+
+* **Profiler overlay**: FPS, frame time breakdown (sim / render / net), tiles sent/received, DC backlog, throughput, RTT.
+* **Adaptive tile budget** for rendering (viewer) and **adaptive send budget** for streaming (host) driven by frame time and network pressure.
+* **Auto‑throttle** of simulation tick if the viewer falls behind (optional back‑pressure signal).
+
+---
+
+## Directory Tree (delta)
+
+```
+MPL-Stage-3/
+├─ package.json
+├─ README.md
+├─ server/
+│  └─ signal-3d.ts
+├─ src/
+│  ├─ profiler/
+│  │  ├─ perf.ts              # NEW: metrics ring buffer + EMA
+│  │  └─ overlay.ts           # NEW: HUD overlay renderer
+│  ├─ adaptive/
+│  │  ├─ budgeter.ts          # NEW: frame‑time → tile budget (viewer)
+│  │  └─ qos.ts               # NEW: DC backlog/throughput → send budget (host)
+│  ├─ net/
+│  │  └─ protocol.ts          # UPDATED: + ping/pong control frames
+│  ├─ stream/
+│  │  ├─ tiles-host.ts        # UPDATED: supports dynamic send budget
+│  │  └─ tiles-view.ts        # UPDATED: expose counters for HUD
+│  └─ web/
+│     ├─ stream-host-3e.ts    # NEW: Host UI w/ profiler + adaptive QoS
+│     └─ stream-view-3e.ts    # NEW: Viewer UI w/ profiler + adaptive tile budget
+├─ index-3e-host.html         # NEW: Stage 3E host launcher
+└─ index-3e-view.html         # NEW: Stage 3E viewer launcher
+```
+
+Add to **package.json**:
+
+```json
+{
+  "scripts": {
+    "dev:3e": "vite --open index-3e-host.html"
+  }
+}
+```
+
+---
+
+## src/profiler/perf.ts (NEW)
+
+```ts
+export type FrameSample = {
+  t: number;               // timestamp (ms)
+  dt: number;              // frame duration (ms)
+  simMs?: number;
+  renderMs?: number;
+  packMs?: number;
+  sendMs?: number;
+  recvTiles?: number;
+  sendTiles?: number;
+  bytesTx?: number;
+  bytesRx?: number;
+  rttMs?: number;
+  dcBuffered?: number;     // datachannel bufferedAmount
+};
+
+export class EMA { constructor(private a=0.15, private v=0){ } update(x:number){ this.v = this.a*x + (1-this.a)*this.v; return this.v; } value(){ return this.v; } }
+
+export class Perf {
+  private samples: FrameSample[] = []; private max=240;
+  fpsE = new EMA(0.2, 60); dtE = new EMA(0.2, 16);
+  simE = new EMA(0.3, 0); renE = new EMA(0.3, 0); packE = new EMA(0.3, 0); sendE = new EMA(0.3, 0);
+  rttE = new EMA(0.3, 0); txE = new EMA(0.3, 0); rxE = new EMA(0.3, 0); tilesTXE = new EMA(0.3, 0); tilesRXE = new EMA(0.3, 0); bufE = new EMA(0.3, 0);
+
+  push(s: FrameSample){
+    this.samples.push(s); if (this.samples.length>this.max) this.samples.shift();
+    const fps = 1000/Math.max(1e-6, s.dt); this.fpsE.update(fps); this.dtE.update(s.dt);
+    if (s.simMs!=null) this.simE.update(s.simMs);
+    if (s.renderMs!=null) this.renE.update(s.renderMs);
+    if (s.packMs!=null) this.packE.update(s.packMs);
+    if (s.sendMs!=null) this.sendE.update(s.sendMs);
+    if (s.rttMs!=null) this.rttE.update(s.rttMs);
+    if (s.bytesTx!=null) this.txE.update(s.bytesTx);
+    if (s.bytesRx!=null) this.rxE.update(s.bytesRx);
+    if (s.sendTiles!=null) this.tilesTXE.update(s.sendTiles);
+    if (s.recvTiles!=null) this.tilesRXE.update(s.recvTiles);
+    if (s.dcBuffered!=null) this.bufE.update(s.dcBuffered);
+  }
+
+  head(){ return this.samples[this.samples.length-1]; }
+}
+```
+
+---
+
+## src/profiler/overlay.ts (NEW)
+
+```ts
+import { Perf } from './perf.js';
+
+export class OverlayHUD {
+  private el: HTMLCanvasElement; private ctx: CanvasRenderingContext2D;
+  constructor(parent: HTMLElement, private perf: Perf){
+    this.el = document.createElement('canvas'); this.el.width=320; this.el.height=140; this.el.style.cssText='position:fixed; left:12px; bottom:12px; background:rgba(16,20,24,.75); border:1px solid #1b2227; border-radius:10px; image-rendering: pixelated; z-index:9999;';
+    this.ctx = this.el.getContext('2d')!; parent.appendChild(this.el);
+  }
+  draw(){
+    const c=this.ctx, p=this.perf; c.clearRect(0,0,this.el.width,this.el.height);
+    c.fillStyle='#e8eef2'; c.font='12px system-ui';
+    const y0=16; let y=y0; const line=(t:string)=>{ c.fillText(t, 10, y); y+=14; };
+    line(`FPS ${p.fpsE.value().toFixed(1)}  Δ ${p.dtE.value().toFixed(1)}ms`);
+    line(`Sim ${p.simE.value().toFixed(1)}ms  Draw ${p.renE.value().toFixed(1)}ms`);
+    line(`Pack ${p.packE.value().toFixed(1)}ms  Send ${p.sendE.value().toFixed(1)}ms`);
+    line(`Tiles TX ${p.tilesTXE.value().toFixed(1)}/f  RX ${p.tilesRXE.value().toFixed(1)}/f`);
+    line(`Throughput TX ${ (p.txE.value()/1024).toFixed(1)} KB/s  RX ${ (p.rxE.value()/1024).toFixed(1)} KB/s`);
+    line(`RTT ${p.rttE.value().toFixed(0)} ms  DC buffered ${p.bufE.value().toFixed(0)} B`);
+  }
+}
+```
+
+---
+
+## src/adaptive/budgeter.ts (NEW — viewer tile budget)
+
+```ts
+export class TileBudgeter {
+  constructor(
+    private targetMs = 16.7,       // ~60 fps
+    private minTiles = 2,
+    private maxTiles = 128,
+    private gain = 0.8             // responsiveness
+  ){}
+  private budget = 8;
+  update(frameMs: number){
+    const err = this.targetMs - frameMs; // positive => can do more
+    this.budget = Math.round(Math.min(this.maxTiles, Math.max(this.minTiles, this.budget + this.gain * (err/this.targetMs) * this.budget)));
+    return this.budget;
+  }
+  value(){ return this.budget; }
+}
+```
+
+---
+
+## src/adaptive/qos.ts (NEW — host send budget)
+
+```ts
+export class QoS {
+  constructor(
+    private minTiles = 8,
+    private maxTiles = 256,
+    private upStep = 1.20,         // AIMD up
+    private downStep = 0.60,       // AIMD down
+    private hi = 512*1024,         // >512KB buffered → back off
+    private lo = 64*1024           // <64KB buffered → ramp up
+  ){}
+  private budget = 64;
+  adjust(bufferedBytes: number){
+    if (bufferedBytes > this.hi) this.budget = Math.max(this.minTiles, Math.floor(this.budget * this.downStep));
+    else if (bufferedBytes < this.lo) this.budget = Math.min(this.maxTiles, Math.ceil(this.budget * this.upStep));
+    return this.budget;
+  }
+  value(){ return this.budget; }
+}
+```
+
+---
+
+## src/net/protocol.ts (UPDATED — add ping/pong)
+
+```ts
+// Add control frames: 4=Ping(ms since epoch truncated), 5=Pong(same ts)
+export function packPing(ts:number){ const buf=new ArrayBuffer(1+4); const dv=new DataView(buf); dv.setUint8(0,4); dv.setUint32(1, ts>>>0, true); return buf; }
+export function packPong(ts:number){ const buf=new ArrayBuffer(1+4); const dv=new DataView(buf); dv.setUint8(0,5); dv.setUint32(1, ts>>>0, true); return buf; }
+// Extend unpack:
+export function unpack(buf:ArrayBuffer){ /* keep old code but add: */
+  const dv = new DataView(buf); const t=dv.getUint8(0);
+  if (t===5){ return { type:5, ts: dv.getUint32(1,true) } as const; }
+  if (t===4){ return { type:4, ts: dv.getUint32(1,true) } as const; }
+  // … existing cases 3/2/1 …
+  return { type:0 } as const;
+}
+```
+
+---
+
+## src/stream/tiles-host.ts (UPDATED — dynamic send budget hook)
+
+```ts
+// Add public setter for budget per tick
+export class TileStreamerHost {
+  // … existing fields …
+  public tilesPerTick = 64; // default, can be adapted every tick
+  // in tick(): replace fixed `let budget = 64;` with:
+  let budget = this.tilesPerTick;
+}
+```
+
+---
+
+## src/stream/tiles-view\.ts (UPDATED — counters for HUD)
+
+```ts
+export class RemoteGridBuffer {
+  // … existing …
+  tilesRx = 0; bytesRx = 0;
+  version(){ return this._ver; }
+  apply(buf:ArrayBuffer){
+    this.bytesRx += buf.byteLength;
+    const m = unpack(buf);
+    if (m.type===3){ /* meta */ }
+    else if (m.type===2){ /* reset */ }
+    else if (m.type===1){ /* tile */ this.tilesRx++; /* existing copy code */ }
+  }
+}
+```
+
+---
+
+## src/web/stream-host-3e.ts (NEW — Host UI with profiler & QoS)
+
+```ts
+import { WebGpuStepper, bsToMasks } from '../gpu/stepper.js';
+import { TileStreamerHost } from '../stream/tiles-host.js';
+import { connectRTC } from '../net/rtc.js';
+import { Perf } from '../profiler/perf.js';
+import { OverlayHUD } from '../profiler/overlay.js';
+import { QoS } from '../adaptive/qos.js';
+import { packPing, unpack } from '../net/protocol.js';
+
+const $=<T extends HTMLElement>(id:string)=> document.getElementById(id) as T;
+const roomInp=$('room') as HTMLInputElement; const startBtn=$('start'); const playBtn=$('play'); const stepBtn=$('step');
+const ruleInp=$('rule') as HTMLInputElement; const engineSel=$('engine') as HTMLSelectElement; const gridSel=$('grid') as HTMLSelectElement;
+const budgetLbl=$('budget');
+
+let gridW=1024, gridH=768; let gpu: WebGpuStepper|null=null; let producer:any=null; let streamer:TileStreamerHost|null=null; let peer:any=null; let playing=false;
+const perf = new Perf(); const hud = new OverlayHUD(document.body, perf);
+const qos = new QoS();
+
+function parseGrid(v:string){ const [w,h]=v.split('x').map(Number); gridW=w; gridH=h; }
+
+async function makeProducer(){
+  if (engineSel.value==='GPU'){
+    const { birthMask, surviveMask } = bsToMasks(ruleInp.value||'B3/S23');
+    const stepper = new WebGpuStepper({ width:gridW, height:gridH, birthMask, surviveMask, useMoore:true, wrapEdges:true, seed:()=> Math.random()<0.18?1:0 });
+    await stepper.init(); gpu = stepper;
+    return { gridW, gridH, tileW:64, tileH:64, version:()=>stepper.getVersion(), readTile:(x0:number,y0:number,w:number,h:number)=> stepper.readTile(x0,y0,w,h), tick:()=> stepper.stepOnce() };
+  } else {
+    // Simple CPU evolve for demo
+    const N=gridW*gridH; let A=new Uint8Array(N); for(let i=0;i<N;i++) A[i]=Math.random()<0.18?1:0; let B=new Uint8Array(N); let ver=0;
+    const get=(x:number,y:number)=> A[((y+gridH)%gridH)*gridW + ((x+gridW)%gridW)]&1;
+    return {
+      gridW, gridH, tileW:64, tileH:64, version:()=>ver, readTile(x0:number,y0:number,w:number,h:number){ const out=new Uint8Array(w*h); for(let y=0;y<h;y++){ out.set(A.slice((y0+y)*gridW+x0, (y0+y)*gridW+x0+w), y*w); } return out; }, tick(){ for(let y=0;y<gridH;y++) for(let x=0;x<gridW;x++){ let n=0; for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ if(dx||dy) n+= get(x+dx,y+dy); } const self=get(x,y); B[y*gridW+x] = self? (n===2||n===3?1:0) : (n===3?1:0); } const T=A; A=B; B=T; ver++; }
+    };
+  }
+}
+
+async function start(){
+  parseGrid(gridSel.value);
+  producer = await makeProducer();
+  peer = await connectRTC('host', roomInp.value||'demo');
+  peer.dc.binaryType='arraybuffer';
+  peer.dc.bufferedAmountLowThreshold = 128*1024;
+  peer.dc.onmessage = (ev:MessageEvent)=>{ const u = unpack(ev.data); if (u.type===5){ const now = (Date.now()>>>0); const rtt = now - u.ts; perf.push({ t: performance.now(), dt: 0, rttMs: rtt }); } };
+  streamer = new TileStreamerHost(producer, (buf)=>{ const t0=performance.now(); peer.dc.send(buf); const sendMs=performance.now()-t0; perf.push({ t:performance.now(), dt:0, sendMs, bytesTx: (buf as ArrayBuffer).byteLength, sendTiles:0 }); });
+}
+
+async function tick(){
+  const t0 = performance.now();
+  producer.tick();
+  const simMs = performance.now() - t0;
+
+  // Adaptive send budget based on DC backlog
+  const back = peer.dc.bufferedAmount || 0; streamer!.tilesPerTick = qos.adjust(back); budgetLbl!.textContent = String(streamer!.tilesPerTick);
+
+  const p0 = performance.now(); await streamer!.tick(); const packSendMs = performance.now() - p0;
+
+  // Ping for RTT (1Hz)
+  if (Math.floor(performance.now()/1000) !== Math.floor((performance.now()-simMs)/1000)){
+    const ts = (Date.now()>>>0); peer.dc.send(packPing(ts));
+  }
+
+  const dt = performance.now() - t0; perf.push({ t:performance.now(), dt, simMs, packMs: packSendMs, dcBuffered: back }); hud.draw();
+}
+
+function loop(){ if(!playing) return; tick().then(()=> requestAnimationFrame(loop)); }
+
+startBtn!.addEventListener('click', ()=> start());
+playBtn!.addEventListener('click', ()=>{ playing=!playing; playBtn!.textContent = playing? '⏸ Pause':'▶︎ Play'; if(playing) loop(); });
+stepBtn!.addEventListener('click', ()=>{ if(!playing) tick(); });
+```
+
+---
+
+## src/web/stream-view-3e.ts (NEW — Viewer UI with profiler & tile budgeter)
+
+```ts
+import { connectRTC } from '../net/rtc.js';
+import { RemoteGridBuffer } from '../stream/tiles-view.js';
+import { TiledRenderer } from '../render/tiled-renderer.js';
+import { Perf } from '../profiler/perf.js';
+import { OverlayHUD } from '../profiler/overlay.js';
+import { TileBudgeter } from '../adaptive/budgeter.js';
+import { packPong, unpack } from '../net/protocol.js';
+
+const $=<T extends HTMLElement>(id:string)=> document.getElementById(id) as T;
+const roomInp=$('room') as HTMLInputElement; const connectBtn=$('connect'); const playBtn=$('play');
+const budgetLbl=$('budget');
+
+let peer:any=null; let playing=true; let view={x:0,y:0,zoom:4};
+const perf = new Perf(); const hud = new OverlayHUD(document.body, perf); const budgeter = new TileBudgeter(16.7, 2, 192, 0.9);
+const remote = new RemoteGridBuffer();
+const canvas = document.getElementById('grid') as HTMLCanvasElement;
+let renderer = new TiledRenderer(canvas, { gridW:0, gridH:0, version:()=> remote.version(), readRect:(x0:number,y0:number,x1:number,y1:number)=>{ const w=x1-x0, h=y1-y0; const out=new Uint8Array(w*h); for(let y=0;y<h;y++){ const off=(y0+y)*remote.gridW+x0; out.set(remote.buf.slice(off,off+w), y*w); } return out; } }, 64, 64);
+
+function loop(){ if(!playing) return; const t0=performance.now(); const startDraw=performance.now(); renderer.draw(view, budgeter.value()).then(()=>{ const renderMs=performance.now()-startDraw; const dt=performance.now()-t0; const newBudget = budgeter.update(dt); budgetLbl!.textContent = String(newBudget); perf.push({ t:performance.now(), dt, renderMs, recvTiles: remote.tilesRx, bytesRx: remote.bytesRx }); remote.tilesRx=0; remote.bytesRx=0; hud.draw(); requestAnimationFrame(loop); }); }
+
+connectBtn.addEventListener('click', async ()=>{
+  peer = await connectRTC('viewer', roomInp.value||'demo');
+  peer.dc.binaryType='arraybuffer';
+  peer.dc.onmessage = (ev:MessageEvent)=>{ const buf = ev.data as ArrayBuffer; const u=unpack(buf); if (u.type===4){ peer.dc.send(packPong(u.ts)); return; } remote.apply(buf); };
+  loop();
+});
+
+playBtn.addEventListener('click', ()=>{ playing=!playing; playBtn!.textContent = playing? '⏸ Pause draw':'▶︎ Resume draw'; if(playing) loop(); });
+
+// Pan/zoom (as in 3C)
+let dragging=false, lastX=0, lastY=0; canvas.addEventListener('mousedown', e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; });
+window.addEventListener('mouseup', ()=> dragging=false);
+window.addEventListener('mousemove', e=>{ if(!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; view.x = Math.max(0, Math.min(remote.gridW-1, view.x - dx/view.zoom)); view.y = Math.max(0, Math.min(remote.gridH-1, view.y - dy/view.zoom)); });
+canvas.addEventListener('wheel', e=>{ e.preventDefault(); const factor=e.deltaY<0?1.1:0.9; view.zoom=Math.max(1,Math.min(32,view.zoom*factor)); }, { passive:false });
+```
+
+---
+
+## index-3e-host.html (NEW)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 3E – Host (Profiler + Adaptive QoS)</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 360px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, input, select { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 3E (Host • Profiler + Adaptive QoS)</h1>
+    <small>Automatic send budget, RTT, throughput HUD</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <label>Room</label>
+        <input id="room" value="demo" />
+        <button id="start">Connect</button>
+      </div>
+      <div class="row">
+        <label>Engine</label>
+        <select id="engine"><option>GPU</option><option>CPU</option></select>
+        <label>Rule</label>
+        <input id="rule" value="B3/S23" />
+      </div>
+      <div class="row">
+        <label>Grid</label>
+        <select id="grid"><option>1024x768</option><option>1536x1024</option><option>2048x1536</option></select>
+      </div>
+      <div class="row">
+        <button id="play">▶︎ Play</button>
+        <button id="step">Step</button>
+      </div>
+      <div class="row">Send budget (tiles/tick): <strong id="budget">—</strong></div>
+      <p>Open the viewer (3E) and join the same room.</p>
+    </aside>
+    <section class="panel">
+      <p>The floating HUD shows FPS, timings, DC backlog, and RTT.</p>
+    </section>
+  </main>
+  <script type="module" src="/src/web/stream-host-3e.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## index-3e-view\.html (NEW)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 3E – Viewer (Profiler + Adaptive Budget)</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    button, input { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+    canvas { background:#0a0e11; border:1px solid #1b2227; border-radius:8px; image-rendering: pixelated; width:100%; height:auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL – Stage 3E (Viewer • Profiler + Adaptive Tile Budget)</h1>
+    <small>HUD with frame time • auto tile budget</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <label>Room</label>
+        <input id="room" value="demo" />
+        <button id="connect">Connect</button>
+      </div>
+      <div class="row">Render tile budget: <strong id="budget">—</strong></div>
+      <div class="row"><button id="play">⏸ Pause draw</button></div>
+    </aside>
+    <section class="panel">
+      <canvas id="grid" width="960" height="640"></canvas>
+    </section>
+  </main>
+  <script type="module" src="/src/web/stream-view-3e.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## README addendum (3E)
+
+````md
+### 3E – Profiler + Adaptive Budgets & Bitrate
+
+Run signaling once (from 3D):
+```bash
+npm run signal:3d
+````
+
+Host with profiler + QoS:
+
+```bash
+npm run dev:3e
+# open index-3e-host.html
+```
+
+Viewer with profiler + adaptive tile budget:
+
+* Open `index-3e-view.html` in another tab/device and join the same room.
+
+**What adapts?**
+
+* **Viewer** uses measured frame time to adjust its **tile redraw budget** every frame to stay near the target FPS.
+* **Host** uses DataChannel `bufferedAmount` (queue size) to aim for low‑latency streaming by adapting the **tiles‑per‑tick** send budget.
+* **RTT** is estimated via a lightweight **ping/pong** control frame for visibility in the HUD.
+
+**Notes**
+
+* All adaptations are bounded and hysteretic to avoid oscillations.
+* For deterministic experiments, you can pin budgets (disable adaptation) with tiny code changes in `budgeter.ts` and `qos.ts`.
+
+```
+```

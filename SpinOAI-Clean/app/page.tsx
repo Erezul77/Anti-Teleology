@@ -323,7 +323,7 @@ export default function HomePage() {
                     : 'bg-blue-500 text-white hover:bg-blue-600'
                 }`}
               >
-                <Image src="/favicon.gif" alt="SpiñO" width={32} height={32} className="rounded" />
+                <Image src="/favicon.PNG" alt="SpiñO" width={32} height={32} className="rounded" />
                 <span>Load Previous Session</span>
               </button>
             </div>

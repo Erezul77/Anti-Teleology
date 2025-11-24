@@ -1,0 +1,544 @@
+# MPL Playground — Stage 3N Patch (Searchable Rule Log + Filter Chips)
+
+This patch adds a fast, **searchable Rule Log** with **filter chips**, timeline markers, and deep links into the scrubber. It builds on 3I–3M and stays dependency‑free.
+
+**What’s new**
+
+* Flatten all `rulesFired` into a **Rule Log** (with `index`→timeline mapping)
+* **Search bar** with lightweight query language (`rule:R1 monad:A tick:10..30 -rule:R3 text:"foo"`)
+* **Filter chips** (add/remove predicates without typing)
+* **Results table** with jump buttons (seek to index, pin ghost)
+* **Timeline markers** for the filtered set
+* **CSV export** of filtered results
+
+---
+
+## 1) `engine/debugger/ruleLog.ts` (new)
+
+```ts
+// engine/debugger/ruleLog.ts
+// Stage 3N — Build a searchable, filterable rule log from ExecutionSnapshot[]
+
+import { ExecutionSnapshot, RuleFire } from "./graphTypes";
+
+export interface RuleLogItem extends RuleFire {
+  index: number;        // index in the history array
+}
+
+export interface RuleLogFilter {
+  ruleIds?: string[];           // exact or prefix match (case-insensitive)
+  monadIds?: string[];          // monadId stringified exact match
+  sourceIds?: string[];         // optional when directional
+  targetIds?: string[];         // optional when directional
+  tickMin?: number;
+  tickMax?: number;
+  edgeOnly?: boolean;           // only events with sourceId & targetId
+  text?: string;                // substring against ruleId + meta JSON
+}
+
+export function buildRuleLog(history: ExecutionSnapshot[]): RuleLogItem[] {
+  const out: RuleLogItem[] = [];
+  for (let i = 0; i < history.length; i++) {
+    const s = history[i];
+    if (!s.rulesFired) continue;
+    for (const rf of s.rulesFired) out.push({ ...rf, index: i });
+  }
+  return out;
+}
+
+function norm(v?: string) { return (v ?? "").toLowerCase(); }
+
+export function filterRuleLog(items: RuleLogItem[], f: RuleLogFilter): RuleLogItem[] {
+  return items.filter(it => {
+    if (f.edgeOnly && (it.sourceId == null || it.targetId == null)) return false;
+    if (f.ruleIds && f.ruleIds.length) {
+      const v = norm(it.ruleId);
+      if (!f.ruleIds.some(r => v.startsWith(norm(r)))) return false;
+    }
+    if (f.monadIds && f.monadIds.length) {
+      if (!f.monadIds.includes(String(it.monadId))) return false;
+    }
+    if (f.sourceIds && f.sourceIds.length) {
+      if (!f.sourceIds.includes(String(it.sourceId))) return false;
+    }
+    if (f.targetIds && f.targetIds.length) {
+      if (!f.targetIds.includes(String(it.targetId))) return false;
+    }
+    if (f.tickMin != null && it.at < f.tickMin) return false;
+    if (f.tickMax != null && it.at > f.tickMax) return false;
+    if (f.text && f.text.trim()) {
+      const hay = `${it.ruleId} ${JSON.stringify(it.meta || {})}`.toLowerCase();
+      if (!hay.includes(f.text.toLowerCase())) return false;
+    }
+    return true;
+  });
+}
+
+// Tiny query parser: tokens like key:value; supports tick:a..b and plain text
+// Keys: rule, monad, source, target, tick, edge, text
+export function parseQuery(q: string): { filter: RuleLogFilter; negatives: RuleLogFilter } {
+  const filter: RuleLogFilter = {};
+  const negatives: RuleLogFilter = {};
+  const tokens = q.match(/\S+:/) ? splitKV(q) : q.split(/\s+/).filter(Boolean);
+
+  for (const raw of tokens) {
+    const neg = raw.startsWith("-");
+    const tok = neg ? raw.slice(1) : raw;
+    const [k, vRaw] = tok.includes(":") ? [tok.slice(0, tok.indexOf(":")), tok.slice(tok.indexOf(":") + 1)] : ["text", tok];
+    const v = vRaw.replace(/^"|"$/g, "");
+    const tgt = neg ? negatives : filter;
+    switch (k.toLowerCase()) {
+      case "rule":
+        (tgt.ruleIds ||= []).push(v);
+        break;
+      case "monad":
+        (tgt.monadIds ||= []).push(v);
+        break;
+      case "source":
+        (tgt.sourceIds ||= []).push(v);
+        break;
+      case "target":
+        (tgt.targetIds ||= []).push(v);
+        break;
+      case "tick": {
+        const m = v.match(/^(\d+)(?:\.\.(\d+))?$/);
+        if (m) { if (m[1]) tgt.tickMin = Number(m[1]); if (m[2]) tgt.tickMax = Number(m[2]); }
+        break;
+      }
+      case "edge":
+        tgt.edgeOnly = v === "1" || v.toLowerCase() === "true" || v === "yes";
+        break;
+      case "text":
+      default:
+        tgt.text = (tgt.text ? `${tgt.text} ` : "") + v;
+    }
+  }
+  return { filter, negatives };
+}
+
+function splitKV(q: string): string[] {
+  // Keep quoted values; split on space not within quotes
+  const out: string[] = [];
+  let cur = ""; let inQ = false;
+  for (const ch of q) {
+    if (ch === '"') { inQ = !inQ; cur += ch; continue; }
+    if (!inQ && ch === ' ') { if (cur) out.push(cur), cur = ""; else continue; }
+    else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+export function applyNegatives(items: RuleLogItem[], neg: RuleLogFilter): RuleLogItem[] {
+  return items.filter(it => !filterRuleLog([it], neg).length);
+}
+
+export function toCSV(items: RuleLogItem[]): string {
+  const header = ["index","tick","ruleId","monadId","sourceId","targetId","meta"];
+  const rows = items.map(it => [it.index, it.at, safe(it.ruleId), safe(it.monadId), safe(it.sourceId), safe(it.targetId), json(it.meta)]);
+  return [header.join(","), ...rows.map(r => r.join(","))].join("\n");
+}
+
+function safe(v: any): string { return v == null ? "" : `"${String(v).replace(/"/g,'""')}"`; }
+function json(v: any): string { return safe(v ? JSON.stringify(v) : ""); }
+```
+
+---
+
+## 2) `playground/components/RuleFilterChips.tsx` (new)
+
+```tsx
+// playground/components/RuleFilterChips.tsx
+// Stage 3N — Render active filter chips with remove buttons, and quick-add controls
+
+import React from "react";
+import { RuleLogFilter } from "../../engine/debugger/ruleLog";
+
+interface RuleFilterChipsProps {
+  filter: RuleLogFilter;
+  onChange: (next: RuleLogFilter) => void;
+}
+
+export const RuleFilterChips: React.FC<RuleFilterChipsProps> = ({ filter, onChange }) => {
+  const rm = (key: keyof RuleLogFilter, value?: string) => {
+    const next: RuleLogFilter = { ...filter } as any;
+    if (Array.isArray((next as any)[key]) && value != null) {
+      (next as any)[key] = ((next as any)[key] as string[]).filter((x: string) => x !== value);
+      if (!(next as any)[key].length) delete (next as any)[key];
+    } else {
+      delete (next as any)[key];
+    }
+    onChange(next);
+  };
+
+  const chips: { k: keyof RuleLogFilter; label: string; value?: string }[] = [];
+  (filter.ruleIds || []).forEach(v => chips.push({ k: "ruleIds", label: `rule:${v}`, value: v }));
+  (filter.monadIds || []).forEach(v => chips.push({ k: "monadIds", label: `monad:${v}`, value: v }));
+  (filter.sourceIds || []).forEach(v => chips.push({ k: "sourceIds", label: `source:${v}`, value: v }));
+  (filter.targetIds || []).forEach(v => chips.push({ k: "targetIds", label: `target:${v}`, value: v }));
+  if (filter.tickMin != null || filter.tickMax != null) chips.push({ k: "tickMin", label: `tick:${filter.tickMin ?? ''}..${filter.tickMax ?? ''}` });
+  if (filter.edgeOnly) chips.push({ k: "edgeOnly", label: "edge:yes" });
+  if (filter.text) chips.push({ k: "text", label: `text:${filter.text}` });
+
+  return (
+    <div className="mpl-chips">
+      {chips.map((c, i) => (
+        <span key={i} className="mpl-chip" title="Click to remove" onClick={() => rm(c.k, c.value)}>
+          {c.label} <b>×</b>
+        </span>
+      ))}
+      {chips.length === 0 && <span className="mpl-chip ghost">No filters</span>}
+    </div>
+  );
+};
+```
+
+---
+
+## 3) `playground/components/RuleLogPanel.tsx` (new)
+
+```tsx
+// playground/components/RuleLogPanel.tsx
+// Stage 3N — Searchable rule log with filter chips, jump actions, CSV export, and size limit
+
+import React, { useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { RuleLogItem, RuleLogFilter, buildRuleLog, filterRuleLog, parseQuery, applyNegatives, toCSV } from "../../engine/debugger/ruleLog";
+import { RuleFilterChips } from "./RuleFilterChips";
+
+interface RuleLogPanelProps {
+  history: ExecutionSnapshot[];                 // timeline
+  onGoToIndex: (i: number) => void;             // seek in scrubber
+  onPinGhost: (i: number) => void;              // pin ghost to index
+  onSelectMonad?: (id: string) => void;         // optional: focus a monad when clicking
+  onMarksChange?: (indices: number[]) => void;  // notify TimeScrubber to mark results
+}
+
+export const RuleLogPanel: React.FC<RuleLogPanelProps> = ({ history, onGoToIndex, onPinGhost, onSelectMonad, onMarksChange }) => {
+  const log = useMemo(() => buildRuleLog(history), [history]);
+  const [query, setQuery] = useState("");
+  const [{ filter, negatives }, setParsed] = useState(() => parseQuery(""));
+  const [limit, setLimit] = useState(500);
+
+  const filtered = useMemo(() => {
+    const base = filterRuleLog(log, filter);
+    const out = negatives ? applyNegatives(base, negatives) : base;
+    return out;
+  }, [log, filter, negatives]);
+
+  React.useEffect(() => { onMarksChange?.(filtered.map(x => x.index)); }, [filtered.length]);
+
+  const rows = filtered.slice(0, limit);
+
+  const exportCSV = () => {
+    const blob = new Blob([toCSV(filtered)], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "rule_log.csv"; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+  };
+
+  const onSubmit = (e: React.FormEvent) => { e.preventDefault(); setParsed(parseQuery(query)); };
+
+  return (
+    <div className="mpl-rulelog">
+      <form className="mpl-rl-search" onSubmit={onSubmit}>
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search: rule:R1 monad:A tick:10..30 text:\"foo\" -rule:R3" />
+        <button className="mpl-btn" type="submit">Search</button>
+        <button className="mpl-btn" type="button" onClick={() => { setQuery(""); setParsed(parseQuery("")); }}>Clear</button>
+        <label>Limit
+          <select value={limit} onChange={e => setLimit(parseInt(e.target.value))}>
+            <option value={200}>200</option><option value={500}>500</option><option value={1000}>1000</option>
+          </select>
+        </label>
+        <button className="mpl-btn" type="button" onClick={exportCSV}>Export CSV</button>
+      </form>
+
+      <RuleFilterChips filter={filter} onChange={(next) => setParsed({ filter: next, negatives })} />
+
+      <div className="mpl-rl-table-wrap">
+        <table className="mpl-table mpl-rl-table">
+          <thead><tr><th>Idx</th><th>Tick</th><th>Rule</th><th>Monad</th><th>Edge</th><th>Meta</th><th></th></tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={`${r.index}-${i}`}>
+                <td>{r.index}</td>
+                <td>{r.at}</td>
+                <td><code>{r.ruleId}</code></td>
+                <td><a onClick={() => onSelectMonad?.(String(r.monadId))}>{String(r.monadId)}</a></td>
+                <td>{r.sourceId != null && r.targetId != null ? `${r.sourceId}→${r.targetId}` : ""}</td>
+                <td className="mpl-rl-meta">{r.meta ? JSON.stringify(r.meta) : ""}</td>
+                <td className="mpl-rl-actions">
+                  <button className="mpl-btn" onClick={() => onGoToIndex(r.index)}>Jump</button>
+                  <button className="mpl-btn" onClick={() => onPinGhost(r.index)}>Pin A</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filtered.length > limit && (
+          <div className="mpl-rl-more">Showing {limit} of {filtered.length}. Increase limit to see more.</div>
+        )}
+        {filtered.length === 0 && <div className="mpl-empty">No matches</div>}
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 4) `playground/components/TimeScrubber.tsx` (augment: rule markers)
+
+```tsx
+// playground/components/TimeScrubber.tsx
+// Stage 3N — add rule markers to the timeline rail
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { Bookmark } from "../../engine/debugger/bookmarks";
+import { SessionAnnotation } from "../../engine/debugger/annotations";
+
+interface TimeScrubberProps {
+  timeline: ExecutionSnapshot[];
+  index: number; onChangeIndex: (i: number) => void;
+  ghostIndex: number | null; onChangeGhostIndex: (i: number | null) => void;
+  bookmarks?: Bookmark[];
+  annotations?: SessionAnnotation[];
+  ruleMarks?: number[]; // NEW: indices where filtered rule events occur
+}
+
+export const TimeScrubber: React.FC<TimeScrubberProps> = ({ timeline, index, onChangeIndex, ghostIndex, onChangeGhostIndex, bookmarks = [], annotations = [], ruleMarks = [] }) => {
+  const N = timeline.length; const min = 0; const max = Math.max(0, N - 1);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1); const [loop, setLoop] = useState(true);
+  const timerRef = useRef<number | null>(null); const railRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { if (index > max) onChangeIndex(max); }, [N]);
+  useEffect(() => { if (!playing) return; const ms = 600 / (speed || 1); const id = window.setInterval(() => onChangeIndex(index < max ? index + 1 : (loop ? min : max)), ms); timerRef.current = id as unknown as number; return () => { if (timerRef.current) window.clearInterval(timerRef.current); timerRef.current = null; }; }, [playing, speed, index, max, loop, onChangeIndex]);
+
+  const tick = timeline[index]?.tick ?? index; const aTick = ghostIndex != null ? (timeline[ghostIndex]?.tick ?? ghostIndex) : null;
+  const toPct = (i: number) => (max === min ? 0 : (i - min) / (max - min));
+  const onRailClick = (e: React.MouseEvent) => { if (!railRef.current) return; const rect = railRef.current.getBoundingClientRect(); const frac = (e.clientX - rect.left) / rect.width; const i = Math.round(min + frac * (max - min)); onChangeIndex(i); };
+
+  return (
+    <div className="mpl-timescrubber">
+      <div className="mpl-ts-row">
+        <div className="mpl-ts-controls">
+          <button className="mpl-btn" onClick={() => onChangeIndex(min)} title="Start">⏮</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(Math.max(min, index - 1))} title="Step back">◀</button>
+          <button className="mpl-btn" onClick={() => setPlaying(p => !p)} title={playing ? "Pause" : "Play"}>{playing ? "⏸" : "▶"}</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(Math.min(max, index + 1))} title="Step forward">▶</button>
+          <button className="mpl-btn" onClick={() => onChangeIndex(max)} title="End">⏭</button>
+        </div>
+        <div className="mpl-ts-speed">
+          <label>Speed
+            <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))}>
+              <option value={0.25}>0.25×</option><option value={0.5}>0.5×</option><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option>
+            </select>
+          </label>
+          <label className="mpl-check"><input type="checkbox" checked={loop} onChange={e => setLoop(e.target.checked)} /> Loop</label>
+        </div>
+      </div>
+
+      <div className="mpl-ts-rail" ref={railRef} onClick={onRailClick}>
+        {annotations.filter(a => a.endIndex != null && a.endIndex! > a.index).map(a => (
+          <div key={`band-${a.id}`} className="mpl-ts-band" style={{ left: `${toPct(a.index) * 100}%`, width: `${(toPct(a.endIndex!) - toPct(a.index)) * 100}%`, background: a.color || "#999" }} title={`${a.label} (${a.index}→${a.endIndex})`} />
+        ))}
+        {bookmarks.map((b, k) => (
+          <div key={`bm-${k}`} className="mpl-ts-mark bm" style={{ left: `${toPct(b.index) * 100}%` }} title={b.label || `idx ${b.index}`} onClick={e => { e.stopPropagation(); onChangeIndex(b.index); }} />
+        ))}
+        {annotations.filter(a => a.endIndex == null).map(a => (
+          <div key={`ann-${a.id}`} className="mpl-ts-mark ann" style={{ left: `${toPct(a.index) * 100}%`, background: a.color || "#111" }} title={a.label} onClick={e => { e.stopPropagation(); onChangeIndex(a.index); }} />
+        ))}
+        {/* Rule markers */}
+        {ruleMarks.map((i, k) => (
+          <div key={`rl-${k}-${i}`} className="mpl-ts-mark rl" style={{ left: `${toPct(i) * 100}%` }} title={`rule @ ${i}`} onClick={e => { e.stopPropagation(); onChangeIndex(i); }} />
+        ))}
+        {ghostIndex != null && (
+          <div className="mpl-ts-ghost-pin" style={{ left: `${toPct(ghostIndex) * 100}%` }} title={`A @ ${ghostIndex}`} />
+        )}
+        <div className="mpl-ts-handle" style={{ left: `${toPct(index) * 100}%` }} />
+      </div>
+
+      <div className="mpl-ts-meta">
+        <span>Index: {index}/{max}</span><span>Tick: {tick}</span><span>A: {ghostIndex != null ? `${ghostIndex}/${max}${aTick != null ? ` (t${aTick})` : ""}` : "—"}</span>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/components/DebuggerPanel.tsx` (wire Rule Log + markers)
+
+```tsx
+// playground/components/DebuggerPanel.tsx
+// Stage 3N — Add RuleLogPanel and feed rule markers to TimeScrubber
+
+import React, { useEffect, useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { StateViewer } from "./StateViewer";
+import { TimeScrubber } from "./TimeScrubber";
+import { ImportExportPanel } from "./ImportExportPanel";
+import { Bookmark } from "../../engine/debugger/bookmarks";
+import { BookmarksPanel } from "./BookmarksPanel";
+import { SessionBundle } from "../../engine/debugger/sessionIO";
+import { AnnotationsPanel } from "./AnnotationsPanel";
+import { MonadicNote, SessionAnnotation } from "../../engine/debugger/annotations";
+import { NodeNotesPanel } from "./NodeNotesPanel";
+import { RuleLogPanel } from "./RuleLogPanel";
+
+interface DebuggerPanelProps {
+  snapshot?: ExecutionSnapshot;
+  history?: ExecutionSnapshot[];
+  onFocusMonad?: (id: string) => void;
+}
+
+export const DebuggerPanel: React.FC<DebuggerPanelProps> = ({ snapshot, history, onFocusMonad }) => {
+  const [timeline, setTimeline] = useState<ExecutionSnapshot[]>(() => history ?? (snapshot ? [snapshot] : []));
+  useEffect(() => { if (history && history.length) setTimeline(history); }, [history?.length]);
+  useEffect(() => { if (!history && snapshot) setTimeline([snapshot]); }, [snapshot?.tick]);
+
+  const [idx, setIdx] = useState(() => Math.max(0, timeline.length - 1));
+  useEffect(() => { setIdx(Math.max(0, timeline.length - 1)); }, [timeline.length]);
+
+  const [ghostIdx, setGhostIdx] = useState<number | null>(null);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [annotations, setAnnotations] = useState<SessionAnnotation[]>([]);
+  const [monadNotes, setMonadNotes] = useState<MonadicNote[]>([]);
+  const [selectedMonadId, setSelectedMonadId] = useState<string | null>(null);
+  const [ruleMarks, setRuleMarks] = useState<number[]>([]);
+
+  const current = useMemo<ExecutionSnapshot | undefined>(() => timeline[Math.max(0, Math.min(idx, timeline.length - 1))], [timeline, idx]);
+  const ghost = useMemo<ExecutionSnapshot | undefined>(() => ghostIdx == null ? undefined : timeline[Math.max(0, Math.min(ghostIdx, timeline.length - 1))], [timeline, ghostIdx]);
+
+  const onImport = (bundle: SessionBundle) => {
+    setTimeline(bundle.history || []);
+    setBookmarks(bundle.bookmarks || []);
+    setAnnotations(bundle.annotations || []);
+    setMonadNotes(bundle.monadNotes || []);
+    setIdx(Math.max(0, (bundle.history?.length || 1) - 1));
+    setGhostIdx(null);
+  };
+
+  return (
+    <div className="mpl-debugger-panel">
+      {/* Session I/O */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Session I/O</header>
+        <ImportExportPanel history={timeline} bookmarks={bookmarks} annotations={annotations} monadNotes={monadNotes} onImport={onImport} />
+      </section>
+
+      {/* Timeline */}
+      {timeline.length > 0 && (
+        <section className="mpl-section">
+          <header className="mpl-section-h">Timeline</header>
+          <TimeScrubber timeline={timeline} index={idx} onChangeIndex={setIdx} ghostIndex={ghostIdx} onChangeGhostIndex={setGhostIdx} bookmarks={bookmarks} annotations={annotations} ruleMarks={ruleMarks} />
+        </section>
+      )}
+
+      {/* Rule Log */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Rule Log</header>
+        <RuleLogPanel history={timeline} onGoToIndex={setIdx} onPinGhost={setGhostIdx} onSelectMonad={(id) => { setSelectedMonadId(id); onFocusMonad?.(id); }} onMarksChange={setRuleMarks} />
+      </section>
+
+      {/* Bookmarks */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Bookmarks</header>
+        <BookmarksPanel currentIndex={idx} currentTick={current?.tick ?? idx} bookmarks={bookmarks} onChange={setBookmarks} onGoToIndex={setIdx} />
+      </section>
+
+      {/* Annotations */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Annotations</header>
+        <AnnotationsPanel currentIndex={idx} currentTick={current?.tick ?? idx} maxIndex={Math.max(0, timeline.length - 1)} annotations={annotations} onChange={setAnnotations} onGoToIndex={setIdx} />
+      </section>
+
+      {/* Node notes */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">Node Notes</header>
+        <NodeNotesPanel currentIndex={idx} currentTick={current?.tick ?? idx} selectedMonadId={selectedMonadId ?? undefined} notes={monadNotes} onChange={setMonadNotes} />
+      </section>
+
+      {/* State */}
+      <section className="mpl-section">
+        <header className="mpl-section-h">State</header>
+        {current ? (
+          <StateViewer snapshot={current} ghostSnapshot={ghost} monadNotes={monadNotes.filter(n => n.index === idx)} selectedMonadId={selectedMonadId} onSelectMonad={(id) => { setSelectedMonadId(id); onFocusMonad?.(id); }} />
+        ) : (
+          <div className="mpl-empty">No snapshot available</div>
+        )}
+      </section>
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 3N — Rule log, chips, and rule markers */
+.mpl-rl-search { display: grid; grid-template-columns: 1fr auto auto auto auto; gap: 8px; align-items: center; }
+.mpl-rl-table-wrap { max-height: 320px; overflow: auto; border: 1px solid #e5e5e5; border-radius: 8px; background: #fff; }
+.mpl-rl-table .mpl-rl-actions { white-space: nowrap; }
+.mpl-rl-meta { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; color: #374151; }
+.mpl-rl-more { padding: 8px; font-size: 12px; color: #6b7280; }
+
+.mpl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.mpl-chip { background: #eef2ff; color: #1e40af; border: 1px solid #c7d2fe; border-radius: 999px; padding: 4px 8px; font-size: 12px; cursor: pointer; }
+.mpl-chip b { margin-left: 6px; }
+.mpl-chip.ghost { background: #f3f4f6; color: #6b7280; border-color: #e5e7eb; cursor: default; }
+
+/* Rule markers on the rail */
+.mpl-ts-mark.rl { background: #10b981; box-shadow: 0 0 0 1px rgba(255,255,255,0.9); }
+```
+
+---
+
+## 7) Example — `playground/pages/DebugExample3N.tsx`
+
+```tsx
+// playground/pages/DebugExample3N.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3N() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"] }, { id: "B", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B", "C"] }, { id: "B", neighbors: ["A", "C"] }, { id: "C", neighbors: ["A", "B"] } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B", sourceId: "B", targetId: "C", meta: { w: 2 } } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"] }, { id: "C", neighbors: ["A"] } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" }, { ruleId: "R2b", at: 2, monadId: "A", sourceId: "A", targetId: "C" } ] },
+  ], []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3N — Searchable Rule Log</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 8) Notes
+
+* **Query** supports `rule:`, `monad:`, `source:`, `target:`, `tick:a..b`, `edge:yes`, `text:foo`. Prefix a token with `-` to exclude (e.g., `-rule:R3`). Quoted strings are respected.
+* **Chips** mirror the active positive filter set; click a chip to remove that predicate.
+* **Marks**: the TimeScrubber shows a green tick for each matching index. Clicking a mark jumps there.
+* **Performance**: The log is rebuilt when history changes; filtering is cheap (\~O(N)). If needed, add memoized indices per rule/monad.
+
+---
+
+## 9) Changelog — Stage 3N
+
+* New: `engine/debugger/ruleLog.ts` (flatten + filter + query + CSV)
+* New UI: `RuleLogPanel.tsx`, `RuleFilterChips.tsx`
+* Updated: `TimeScrubber.tsx` (rule markers), `DebuggerPanel.tsx` (wire Rule Log)
+* CSS: chips, rule log table, timeline rule markers
+
+```
+```

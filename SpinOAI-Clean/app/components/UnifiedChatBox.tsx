@@ -288,7 +288,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                 <div className="flex items-start space-x-3">
                                      {message.role === 'assistant' && (
                      <Image 
-                       src="/favicon.gif" 
+                       src="/favicon.PNG" 
                        alt="SpiñO" 
                        width={96} 
                        height={96} 
@@ -350,7 +350,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
             }`}>
               <div className="flex items-center space-x-3">
                                  <Image 
-                   src="/favicon.gif" 
+                   src="/favicon.PNG" 
                    alt="SpiñO" 
                    width={96} 
                    height={96} 

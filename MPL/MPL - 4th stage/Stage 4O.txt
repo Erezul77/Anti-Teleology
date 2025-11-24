@@ -1,0 +1,355 @@
+# MPL Playground — Stage 4O Patch (Global Search: Nodes • Edges • Rules with Regex + Filters)
+
+This patch adds a fast, global **Search** across **nodes, edges, and rules** with **regex** & field filters, plus a canvas **highlight/isolate** overlay and bulk actions (select, zoom, pin/unpin, export ids).
+
+No new deps. Builds on 4C–4N (canvas, inspector, rule overlays, bookmarks, themes, tours).
+
+---
+
+## Highlights
+
+* **Fields**: `id:`, `label:`, `rule:`, `degree:>=N`, `has:pin` (stub), plain tokens (id/label contains)
+* **Regex**: `/pattern/` or `/pattern/i` (mixed with other terms)
+* **Boolean**: implicit **AND**, `OR`, unary NOT via `-token` or `-field:value`
+* **Scopes**: Nodes, Edges, Rules — search any combination
+* **Overlay modes**: **Fade** (dim non‑matches) or **Isolate** (draw only matches)
+* **Actions**: Select All, Zoom to Matches, Pin/Unpin, Copy IDs, Export JSON
+* **Quality‑of‑life**: remembers recent queries; **/** focuses the search box
+
+---
+
+## 1) `engine/search/query.ts` (new) — tiny DSL parser → predicates
+
+```ts
+// engine/search/query.ts — Stage 4O
+export type Term =
+  | { k:'regex'; re: RegExp; neg?: boolean }
+  | { k:'field'; field:'id'|'label'|'rule'|'degree'|'has'; op?: '>='|'>'|'<='|'<'|'='; val:any; neg?: boolean }
+  | { k:'word'; s:string; neg?: boolean }
+  | { k:'or' };
+
+const reRegex = /^\/(.*)\/(i)?$/;
+const reCmp = /^(>=|<=|=|>|<)?\s*(\d+)$/;
+
+export function parseQuery(q: string): Term[] {
+  const parts = q.trim().split(/\s+/);
+  const out: Term[] = [];
+  for (let raw of parts){
+    if (!raw) continue;
+    if (raw.toUpperCase()==='OR'){ out.push({ k:'or' }); continue; }
+    let neg = false; if (raw.startsWith('-')){ neg = true; raw = raw.slice(1); }
+
+    // regex literal
+    const m = reRegex.exec(raw); if (m){ out.push({ k:'regex', re:new RegExp(m[1], m[2]?'i':undefined), neg }); continue; }
+
+    const idx = raw.indexOf(':');
+    if (idx>0){
+      const field = raw.slice(0, idx) as any; const rest = raw.slice(idx+1);
+      if (field==='degree'){ const cm = reCmp.exec(rest); const op = (cm?.[1] as any)||'>='; const val = parseInt(cm?.[2]||rest, 10); out.push({ k:'field', field:'degree', op, val, neg }); continue; }
+      if (field==='has'){ out.push({ k:'field', field:'has', val: rest, neg }); continue; }
+      if (field==='rule'){ out.push({ k:'field', field:'rule', val: rest, neg }); continue; }
+      if (field==='id' || field==='label'){ out.push({ k:'field', field, val: rest, neg }); continue; }
+    }
+
+    out.push({ k:'word', s: raw, neg });
+  }
+  return out;
+}
+
+export function matchesNode(terms: Term[], node: { id:string; label?:string; degree:number; flags?:Set<string> }, rulesHit?: Set<string>): boolean {
+  if (!terms.length) return true;
+  const evalTerm = (t: Term) => {
+    switch (t.k){
+      case 'regex': {
+        const hay = `${node.id} ${node.label||''}`; return t.re.test(hay);
+      }
+      case 'field': {
+        if (t.field==='id') return contains(node.id, String(t.val));
+        if (t.field==='label') return contains(node.label||'', String(t.val));
+        if (t.field==='degree') return cmp(node.degree, t.op||'>=', Number(t.val));
+        if (t.field==='has') return node.flags?.has(String(t.val)) || false;
+        if (t.field==='rule') return rulesHit?.has(String(t.val)) || false;
+        return false;
+      }
+      case 'word': return contains(node.id, t.s) || contains(node.label||'', t.s);
+      default: return false;
+    }
+  };
+
+  // OR splits into groups: A B OR C D  => (A && B) || (C && D)
+  const groups: Term[][] = [[]];
+  for (const t of terms){ if (t.k==='or') groups.push([]); else groups[groups.length-1].push(t); }
+
+  const groupAnd = (gs: Term[]) => gs.every(t => (t.neg ? !evalTerm(t) : evalTerm(t)));
+  return groups.some(groupAnd);
+}
+
+export function matchesEdge(terms: Term[], aId: string, bId: string, degreeA: number, degreeB: number): boolean {
+  const node = { id: `${aId}|${bId}`, label: `${aId} ${bId}`, degree: Math.max(degreeA, degreeB) } as any;
+  return matchesNode(terms, node);
+}
+
+function contains(hay: string, needle: string){ return hay.toLowerCase().includes(needle.toLowerCase()); }
+function cmp(v:number, op: string, t:number){ if (op==='>=') return v>=t; if (op==='>') return v>t; if (op==='<=') return v<=t; if (op==='<') return v<t; return v===t; }
+```
+
+---
+
+## 2) `engine/search/index.ts` (new) — build search view & run queries
+
+```ts
+// engine/search/index.ts — Stage 4O
+import type { SnapshotSlim } from '../core/perf/timelineDelta';
+import { parseQuery, matchesNode, matchesEdge } from './query';
+
+export type SearchScope = { nodes:boolean; edges:boolean; rules:boolean };
+export type SearchResult = { nodes:Set<string>; edges:Set<string>; rules:Set<string>; count:{nodes:number; edges:number; rules:number} };
+
+export function buildSearchView(slim: SnapshotSlim){
+  // Precompute degree and labels (if any styled labels exist, they can be referenced here)
+  const deg: Record<string, number> = {}; const label: Record<string,string|undefined> = {};
+  for (const id in slim.monads){ const nb = slim.monads[id].neighbors||[]; deg[id] = nb.length; label[id] = (slim.monads as any)[id].label; }
+  const edges: [string,string][] = [];
+  for (const id in slim.monads){ const nb = slim.monads[id].neighbors||[]; for (const t of nb){ if (id < t) edges.push([id,t]); } }
+  const rules = new Set<string>(); for (const r of (slim as any).rulesFired || []){ const id = typeof r==='string' ? r : (r?.id ?? String(r)); rules.add(id); }
+  return { deg, label, edges, rules };
+}
+
+export function search(slim: SnapshotSlim, view: ReturnType<typeof buildSearchView>, q: string, scope: SearchScope): SearchResult {
+  const terms = parseQuery(q);
+  const nodes = new Set<string>(); const edges = new Set<string>(); const rules = new Set<string>();
+
+  if (scope.nodes){ for (const id in slim.monads){ const ok = matchesNode(terms, { id, label: view.label[id], degree: view.deg[id] }); if (ok) nodes.add(id); } }
+  if (scope.edges){ for (const [a,b] of view.edges){ if (matchesEdge(terms, a, b, view.deg[a], view.deg[b])) edges.add(edgeKey(a,b)); } }
+  if (scope.rules){ const list = (slim as any).rulesFired || []; for (const item of list){ const name = typeof item==='string'? item : (item?.id ?? String(item)); if (matchesNode(terms, { id:name, label:name, degree:0 })) rules.add(name); } }
+
+  return { nodes, edges, rules, count:{ nodes:nodes.size, edges:edges.size, rules:rules.size } };
+}
+
+export function edgeKey(a:string,b:string){ return a<b? `${a}|${b}` : `${b}|${a}`; }
+```
+
+---
+
+## 3) `engine/renderer/canvas/CanvasGraph.ts` (update) — generic highlight overlay
+
+```ts
+// CanvasGraph.ts — 4O: add generic highlight overlay (alongside rule/diff)
+export type HighlightOverlay = { nodes:Set<string>; edges:Set<string>; color:string; fadeOthers:boolean; isolate:boolean };
+
+export class CanvasGraph {
+  // ...existing fields...
+  private highlight: HighlightOverlay | null = null;
+  setHighlightOverlay(h: HighlightOverlay | null){ this.highlight = h; }
+
+  draw(){
+    const s = this.last; if (!s) return; const ctx = this.ctx; const { width, height } = this.canvas; ctx.save();
+    ctx.fillStyle = this.theme.bg; ctx.fillRect(0,0,width,height); drawGrid(ctx, this.cam, width, height, this.presentation ? 'transparent' : this.theme.grid);
+
+    const H = this.highlight; const stride = Math.max(1, this.lod.sampleStride|0);
+
+    // Edges
+    ctx.lineWidth = this.strokePx(1); let drawn=0; let cursor=this.frameEdgeCursor;
+    outer: for (const id in s.monads){ const m=s.monads[id]; const a=this.externalPos?.[id]||m; const nb=m.neighbors||[]; for (let i=0;i<nb.length;i++){ const t=nb[i]; if (id>=t) continue; if ((cursor++%stride)!==0) continue; const b=this.externalPos?.[t]||s.monads[t]; const A=worldToScreen(a as any,this.cam), B=worldToScreen(b as any,this.cam);
+        let draw=true, alpha=((a as any).alpha*(b as any).alpha), col=this.theme.edge; const key = id<t?`${id}|${t}`:`${t}|${id}`;
+        if (H){ const hit = H.edges.has(key) || H.nodes.has(id) || H.nodes.has(t); if (H.isolate) draw = hit; if (hit){ col = H.color; alpha = 0.95; } else if (H.fadeOthers) alpha *= 0.15; }
+        if (!draw) continue; ctx.strokeStyle=col; ctx.globalAlpha=alpha; ctx.beginPath(); routeEdge(ctx,A.x,A.y,B.x,B.y,this.edgeMode,this.curvature,id<t?1:-1); ctx.stroke(); ctx.globalAlpha=1; if (++drawn>=this.lod.edgeBudget) break outer; }
+    }
+    this.frameEdgeCursor = cursor;
+
+    // Nodes
+    for (const id in s.monads){ const p=this.externalPos?.[id]||s.monads[id]; const scr=worldToScreen(p as any,this.cam); const r=this.getNodeRadius(id);
+      if (H && H.nodes.has(id)){ ctx.save(); ctx.shadowColor=H.color; ctx.shadowBlur=18; ctx.beginPath(); ctx.arc(scr.x,scr.y,r+2,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0)'; ctx.fill(); ctx.restore(); }
+      ctx.beginPath(); ctx.arc(scr.x, scr.y, r, 0, Math.PI*2);
+      let fill = this.sel===id ? this.theme.nodeSel : this.theme.node; if (H && H.fadeOthers && !H.nodes.has(id)) ctx.globalAlpha=0.7; ctx.fillStyle = fill; ctx.fill(); ctx.globalAlpha=1;
+    }
+
+    // labels… (unchanged)
+    ctx.restore();
+  }
+}
+```
+
+---
+
+## 4) `playground/components/SearchPanel.tsx` (new) — UI + results + actions
+
+```tsx
+// playground/components/SearchPanel.tsx — Stage 4O
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { buildSearchView, search } from '../../engine/search/index';
+
+export const SearchPanel: React.FC<{
+  history: ExecutionSnapshot[];
+  tick: number;                          // current index
+  onOverlay: (h: {nodes:Set<string>; edges:Set<string>; color:string; fadeOthers:boolean; isolate:boolean} | null) => void;
+  onSelect: (ids:string[]) => void;
+  onZoom: (ids:string[]) => void;
+  onPin: (ids:string[]) => void;
+  onUnpin: (ids:string[]) => void;
+}>
+= ({ history, tick, onOverlay, onSelect, onZoom, onPin, onUnpin }) => {
+  const [q, setQ] = React.useState('');
+  const [nodes, setNodes] = React.useState(true);
+  const [edges, setEdges] = React.useState(true);
+  const [rules, setRules] = React.useState(false);
+  const [mode, setMode] = React.useState<'fade'|'isolate'>('fade');
+  const [recent, setRecent] = React.useState<string[]>(() => { try{ return JSON.parse(localStorage.getItem('mpl.search.recents')||'[]'); }catch{ return []; } });
+
+  const slim = React.useMemo(()=>toSlim(history[Math.max(0, Math.min(tick, history.length-1))] as any), [tick, history]);
+  const view = React.useMemo(()=>buildSearchView(slim as any), [slim.tick]);
+
+  const res = React.useMemo(()=>search(slim as any, view, q, { nodes, edges, rules }), [q, nodes, edges, rules, view, slim.tick]);
+
+  React.useEffect(()=>{ if (!q){ onOverlay(null); return; } onOverlay({ nodes:res.nodes, edges:res.edges, color:'#22c55e', fadeOthers: mode==='fade', isolate: mode==='isolate' }); }, [q, res.count.nodes, res.count.edges, mode]);
+
+  function applySelect(){ onSelect(Array.from(res.nodes)); }
+  function applyZoom(){ onZoom(Array.from(res.nodes)); }
+  function applyPin(){ onPin(Array.from(res.nodes)); }
+  function applyUnpin(){ onUnpin(Array.from(res.nodes)); }
+
+  function saveRecent(s:string){ const list=[s, ...recent.filter(x=>x!==s)].slice(0,6); setRecent(list); try{ localStorage.setItem('mpl.search.recents', JSON.stringify(list)); }catch{} }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Search</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row">
+          <input id="mpl-search-box" placeholder="e.g. id:N12 degree:>=3 OR /foo.*/i -rule:Bridge" value={q} onChange={e=>setQ(e.target.value)} style={{ flex:1, padding:6, border:'1px solid var(--mpl-border)', borderRadius:8 }} />
+          <button className="mpl-btn" onClick={()=>{ saveRecent(q); }}>Save</button>
+          <label>Mode <select value={mode} onChange={e=>setMode(e.target.value as any)}><option value="fade">Fade</option><option value="isolate">Isolate</option></select></label>
+        </div>
+        <div className="mpl-row">
+          <label><input type="checkbox" checked={nodes} onChange={e=>setNodes(e.target.checked)} /> Nodes</label>
+          <label><input type="checkbox" checked={edges} onChange={e=>setEdges(e.target.checked)} /> Edges</label>
+          <label><input type="checkbox" checked={rules} onChange={e=>setRules(e.target.checked)} /> Rules</label>
+          <div className="mpl-dim" style={{ marginLeft:'auto' }}>{res.count.nodes} nodes • {res.count.edges} edges • {res.count.rules} rules</div>
+        </div>
+        {!!recent.length && <div className="mpl-row" style={{ flexWrap:'wrap' }}>{recent.map((r,i)=> <button key={i} className="mpl-chip" onClick={()=>setQ(r)}>{r}</button>)}</div>}
+        <div className="mpl-row">
+          <button className="mpl-btn" onClick={applySelect} disabled={!res.count.nodes}>Select</button>
+          <button className="mpl-btn" onClick={applyZoom} disabled={!res.count.nodes}>Zoom</button>
+          <button className="mpl-btn" onClick={applyPin} disabled={!res.count.nodes}>Pin</button>
+          <button className="mpl-btn" onClick={applyUnpin} disabled={!res.count.nodes}>Unpin</button>
+          <button className="mpl-btn" onClick={()=>{ navigator.clipboard.writeText(Array.from(res.nodes).join('\n')); }}>Copy IDs</button>
+          <button className="mpl-btn" onClick={()=>{ const blob=new Blob([JSON.stringify({ q, nodes:Array.from(res.nodes), edges:Array.from(res.edges), rules:Array.from(res.rules) }, null, 2)], { type:'application/json' }); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='search-results.json'; a.click(); URL.revokeObjectURL(a.href); }}>Export</button>
+        </div>
+        <div className="mpl-dim">Tips: `/regex/i` for case‑insensitive matches; use `-token` to exclude. Fields: `id:`, `label:`, `rule:`, `degree:>=N`.</div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/components/CanvasPanel.tsx` (update) — wire Search into canvas + hotkeys
+
+```tsx
+// CanvasPanel.tsx — 4O wiring (excerpt)
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { GraphCanvas } from './GraphCanvas';
+import { SearchPanel } from './SearchPanel';
+
+export const CanvasPanel: React.FC<{ timeline: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void }>
+= ({ timeline, index, onIndex }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(timeline[Math.max(0, Math.min(index, timeline.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, timeline]);
+
+  const canvasRef = React.useRef<any>(null);
+  const [selection, setSelection] = React.useState<string[]>([]);
+
+  React.useEffect(()=>{ const g=(canvasRef.current as any)?._graph; if (!g) return; g.setHighlightOverlay(null); }, [slim.tick]);
+
+  // hotkey: '/' to focus search
+  React.useEffect(()=>{ const onKey=(e:KeyboardEvent)=>{ if (e.key==='/'){ e.preventDefault(); const el=document.getElementById('mpl-search-box') as HTMLInputElement|null; el?.focus(); el?.select(); } }; window.addEventListener('keydown', onKey); return ()=>window.removeEventListener('keydown', onKey); }, []);
+
+  function setOverlay(h:any|null){ const g=(canvasRef.current as any)?._graph; if (!g) return; g.setHighlightOverlay(h); g.draw(); }
+  function select(ids:string[]){ setSelection(ids); const g=(canvasRef.current as any)?._graph; if (!g) return; g.setSelection(ids); g.draw(); }
+  function zoom(ids:string[]){ if (!ids.length) return; const g=(canvasRef.current as any)?._graph; if (!g) return; const rect = worldRectOf(g, ids); g.fitWorldRect(rect, 0.9); g.draw(); }
+
+  (window as any).mpl_pin = (ids: string[]) => { console.debug('pin(sel)', ids); /* integrate with physics/worker later */ };
+  (window as any).mpl_unpin = (ids: string[]) => { console.debug('unpin(sel)', ids); };
+
+  return (
+    <div className="mpl-grid">
+      <div className="mpl-main">
+        <GraphCanvas ref={canvasRef} snapshot={slim} onSelect={setSelection} />
+      </div>
+      <aside className="mpl-side">
+        <SearchPanel history={timeline} tick={index} onOverlay={setOverlay} onSelect={select} onZoom={zoom} onPin={(ids)=> (window as any).mpl_pin(ids)} onUnpin={(ids)=> (window as any).mpl_unpin(ids)} />
+      </aside>
+    </div>
+  );
+}
+
+function worldRectOf(g:any, ids:string[]){ let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity; for (const id of ids){ const p=g.externalPos?.[id] || g.last?.monads?.[id]; if (!p) continue; const x=p.x||0,y=p.y||0; if (x<minX)minX=x; if (y<minY)minY=y; if (x>maxX)maxX=x; if (y>maxY)maxY=y; } if (!isFinite(minX)) return { minX:-1,minY:-1,maxX:1,maxY:1 }; return { minX, minY, maxX, maxY }; }
+```
+
+---
+
+## 6) Styles — `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4O — search */
+#mpl-search-box { background: var(--mpl-surface); color: var(--mpl-text); }
+.mpl-chip { background: #eef2ff; border: 1px solid #e5e7eb; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+```
+
+---
+
+## 7) Example — `playground/pages/DebugExample4O.tsx`
+
+```tsx
+// playground/pages/DebugExample4O.tsx
+import React, { useMemo } from 'react';
+import { DebuggerPanel } from '../components/DebuggerPanel';
+import { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+
+function ex(): ExecutionSnapshot[]{
+  const ids = Array.from({length: 120}, (_,i)=>`N${i}`);
+  const monads = ids.map((id,i)=>({ id, neighbors: [] as string[], x: Math.cos(i*.2)*220 + (Math.random()-0.5)*10, y: Math.sin(i*.2)*220 + (Math.random()-0.5)*10 }));
+  for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++) if (Math.random()<0.03){ monads[i].neighbors.push(ids[j]); monads[j].neighbors.push(ids[i]); }
+  const rules = ['Seed','Bridge','PromotePath','AttachTail'];
+  const rf = Array.from({length: 3}, ()=> rules[(Math.random()*rules.length)|0]);
+  return [{ tick:0, monads, rulesFired: rf } as any];
+}
+
+export default function DebugExample4O(){
+  const history = useMemo(ex, []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4O — Global Search (regex + filters)</h1>
+      <DebuggerPanel history={history} />
+      <p className="mpl-dim">Try: <code>degree:>=3</code>, <code>/N(1|2)[0-9]/</code>, <code>rule:Bridge</code>, <code>foo OR bar -N5</code>. Press <kbd>/</kbd> to focus search.</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 8) Notes
+
+* **Performance**: The search runs on the current slim snapshot; for huge graphs, swap to a web worker and stream results.
+* **Rules scope**: `rule:` matches against `rulesFired` for the current tick; extend to multi‑tick windows by tapping 4J’s rule index.
+* **Pins**: `has:pin` is stubbed (flag set not wired); connect to your pin system to make it live.
+* **Overlay precedence**: If rule/diff overlays are active, the **highlight overlay** takes precedence; you can blend by tinting edges sequentially.
+* **Bookmarks/Share**: Query text isn’t encoded in 4K view links by default; add `q` to `ViewState` if you want deep‑linkable searches.
+
+---
+
+## 9) Changelog — Stage 4O
+
+* New: `engine/search/query.ts` (parser), `engine/search/index.ts` (runner)
+* Updated: `CanvasGraph.ts` (generic highlight overlay)
+* New UI: `SearchPanel.tsx`
+* Updated: `CanvasPanel.tsx` (wire overlay + hotkeys)
+* Styles: minor search affordances
+
+```
+```

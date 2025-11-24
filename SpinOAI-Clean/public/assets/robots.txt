@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+# Cache control for favicon
+Disallow: /favicon.svg
+Disallow: /favicon.ico 

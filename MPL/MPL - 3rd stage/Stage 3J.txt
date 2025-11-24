@@ -1,0 +1,508 @@
+# MPL Playground — Stage 3J Patch (Rule‑Highlight Overlay)
+
+This patch delivers **Stage 3J** for the MPL Playground: a live **Rule‑Highlight Overlay** that visually marks which rules just fired on nodes and edges. It is designed to drop in after Stage 3I with minimal friction and no new dependencies.
+
+> **What’s included**
+>
+> * Snapshot→graph enrichment to annotate latest rule‑fires on nodes and edges
+> * SVG overlay in the Graph View: glowing nodes + pulsing edges
+> * Toolbar controls to toggle highlights and set a time window (in ticks)
+> * Minimal CSS for badges and pulse animations
+
+> **How to integrate**
+>
+> 1. Replace the files below (or merge if you customized 3I).
+> 2. Ensure your engine logs `rulesFired` on each tick (see types below). If you only have monad‑level fires, that’s enough; edge‑level pulses are optional.
+> 3. Render `<StateViewer snapshot={currentSnapshot} />` as before.
+
+---
+
+## 1) `engine/debugger/graphTypes.ts`
+
+> Full file (superset of 3I)
+
+```ts
+// engine/debugger/graphTypes.ts
+// Stage 3J — shared graph + snapshot types with rule overlay fields
+
+export type MonadId = string | number;
+
+export interface MonadState {
+  id: MonadId;
+  position?: { x: number; y: number };
+  neighbors?: MonadId[];
+  data?: Record<string, unknown>;
+  active?: boolean;
+}
+
+export interface RuleFire {
+  ruleId: string;
+  at: number;        // tick/time index
+  monadId: MonadId;  // monad affected (required)
+  /** Optional directional metadata when a rule relates two monads */
+  sourceId?: MonadId;
+  targetId?: MonadId;
+  meta?: Record<string, unknown>;
+}
+
+export interface ExecutionSnapshot {
+  tick: number;
+  monads: MonadState[];
+  rulesFired?: RuleFire[];
+  focusMonadId?: MonadId | null;
+}
+
+export interface GraphNode {
+  id: string;        // stringified monad id
+  label?: string;
+  x: number;
+  y: number;
+  radius: number;
+  active?: boolean;
+  data?: Record<string, unknown>;
+  /** Stage 3J: latest rule affecting this node */
+  lastRuleId?: string;
+  lastRuleAt?: number; // tick
+}
+
+export interface GraphEdge {
+  id: string;        // `${source}->${target}` undirected key
+  source: string;
+  target: string;
+  /** Stage 3J: pulse annotation if a directional rule hit this edge recently */
+  pulse?: { ruleId: string; at: number } | null;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+```
+
+---
+
+## 2) `engine/debugger/toGraph.ts`
+
+> Full file (adds rule overlay enrichment on nodes + edges)
+
+```ts
+// engine/debugger/toGraph.ts
+// Stage 3J — snapshot→graph conversion with rule overlay enrichment
+
+import { ExecutionSnapshot, GraphData, GraphEdge, GraphNode, MonadState } from "./graphTypes";
+
+export interface LayoutOptions {
+  radialFallback?: boolean;
+  nodeRadius?: number;
+  spacing?: number;
+}
+
+const DEFAULTS: Required<LayoutOptions> = {
+  radialFallback: true,
+  nodeRadius: 14,
+  spacing: 60,
+};
+
+function sid(id: string | number): string { return typeof id === "string" ? id : String(id); }
+
+function buildEdges(monads: MonadState[]): GraphEdge[] {
+  const seen = new Set<string>();
+  const edges: GraphEdge[] = [];
+  for (const m of monads) {
+    if (!m.neighbors) continue;
+    for (const n of m.neighbors) {
+      const a = sid(m.id);
+      const b = sid(n);
+      const key = a < b ? `${a}->${b}` : `${b}->${a}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ id: key, source: a, target: b, pulse: null });
+    }
+  }
+  return edges;
+}
+
+function radialLayout(monads: MonadState[], spacing: number): { [id: string]: { x: number; y: number } } {
+  const n = monads.length;
+  if (n === 0) return {};
+  const perRing = Math.max(1, Math.round(Math.sqrt(n)));
+  const positions: { [id: string]: { x: number; y: number } } = {};
+  let ring = 0, placed = 0;
+  while (placed < n) {
+    const remaining = n - placed;
+    const count = Math.min(perRing, remaining);
+    const radius = spacing * (ring + 1);
+    for (let i = 0; i < count; i++) {
+      const angle = (2 * Math.PI * i) / count + (ring % 2 === 1 ? Math.PI / count : 0);
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      const m = monads[placed + i];
+      positions[sid(m.id)] = { x, y };
+    }
+    placed += count; ring++;
+  }
+  return positions;
+}
+
+export function buildGraphFromSnapshot(s: ExecutionSnapshot, opts?: LayoutOptions): GraphData {
+  const o = { ...DEFAULTS, ...(opts || {}) };
+  const nodes: GraphNode[] = [];
+  const hasPositions = s.monads.some(m => !!m.position);
+  const fallbackPositions = hasPositions ? {} : radialLayout(s.monads, o.spacing);
+
+  for (const m of s.monads) {
+    const id = sid(m.id);
+    const pos = m.position || fallbackPositions[id] || { x: 0, y: 0 };
+    nodes.push({
+      id,
+      label: id,
+      x: pos.x,
+      y: pos.y,
+      radius: o.nodeRadius,
+      active: !!(m.active || (s.focusMonadId != null && sid(s.focusMonadId) === id)),
+      data: m.data || {},
+      lastRuleId: undefined,
+      lastRuleAt: undefined,
+    });
+  }
+
+  const edges = buildEdges(s.monads);
+
+  // 3J overlay: annotate latest rule fired per node, and edge pulses when directional data exists
+  if (s.rulesFired && s.rulesFired.length) {
+    const latestByNode = new Map<string, { ruleId: string; at: number }>();
+    const edgeIndex = new Map<string, GraphEdge>();
+    for (const e of edges) edgeIndex.set(e.id, e);
+
+    for (const rf of s.rulesFired) {
+      const id = sid(rf.monadId);
+      const prev = latestByNode.get(id);
+      if (!prev || rf.at >= prev.at) latestByNode.set(id, { ruleId: rf.ruleId, at: rf.at });
+
+      if (rf.sourceId != null && rf.targetId != null) {
+        const a = sid(rf.sourceId);
+        const b = sid(rf.targetId);
+        const key = a < b ? `${a}->${b}` : `${b}->${a}`;
+        const e = edgeIndex.get(key);
+        if (e) e.pulse = { ruleId: rf.ruleId, at: rf.at };
+      }
+    }
+
+    for (const n of nodes) {
+      const l = latestByNode.get(n.id);
+      if (l) { n.lastRuleId = l.ruleId; n.lastRuleAt = l.at; }
+    }
+  }
+
+  return { nodes, edges };
+}
+```
+
+---
+
+## 3) `playground/components/GraphStateView.tsx`
+
+> Full file (adds rule highlight rendering + decay window)
+
+```tsx
+// playground/components/GraphStateView.tsx
+// Stage 3J — SVG graph renderer with rule highlight overlay (glow nodes + pulsing edges)
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ExecutionSnapshot, GraphData } from "../../engine/debugger/graphTypes";
+import { buildGraphFromSnapshot } from "../../engine/debugger/toGraph";
+
+interface GraphStateViewProps {
+  snapshot: ExecutionSnapshot;
+  width?: number;
+  height?: number;
+  onSelectMonad?: (id: string) => void;
+  neighborFocusMode?: boolean;
+  /** Stage 3J: show rule highlights */
+  highlightRules?: boolean;
+  /** Stage 3J: how many ticks back to keep highlight visible */
+  highlightWindowTicks?: number; // default 3
+}
+
+function useMeasure(ref: React.RefObject<HTMLElement>) {
+  const [size, setSize] = useState<{ width: number; height: number }>({ width: 300, height: 200 });
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const cr = entry.contentRect;
+      setSize({ width: cr.width, height: cr.height });
+    });
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
+}
+
+export const GraphStateView: React.FC<GraphStateViewProps> = ({ snapshot, width, height, onSelectMonad, neighborFocusMode, highlightRules = true, highlightWindowTicks = 3 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const size = useMeasure(containerRef);
+  const W = width ?? size.width ?? 600;
+  const H = height ?? size.height ?? 400;
+
+  const graph: GraphData = useMemo(() => buildGraphFromSnapshot(snapshot, { nodeRadius: 14, spacing: 80 }), [snapshot]);
+
+  // Pan/Zoom state
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number } | null>(null);
+
+  const onWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = -e.deltaY;
+    const factor = Math.exp(delta * 0.001);
+    setZoom(z => Math.min(4, Math.max(0.25, z * factor)));
+  }, []);
+  const onMouseDown = useCallback((e: React.MouseEvent) => { dragRef.current = { x: e.clientX, y: e.clientY }; }, []);
+  const onMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.x;
+    const dy = e.clientY - dragRef.current.y;
+    dragRef.current = { x: e.clientX, y: e.clientY };
+    setOffset(o => ({ x: o.x + dx, y: o.y + dy }));
+  }, []);
+  const onMouseUp = useCallback(() => { dragRef.current = null; }, []);
+
+  // Neighbor focus dimming
+  const neighborSet = useMemo(() => {
+    if (!neighborFocusMode) return null as null | Set<string>;
+    const focusId = snapshot.focusMonadId != null ? String(snapshot.focusMonadId) : (graph.nodes.find(n => n.active)?.id ?? null);
+    if (!focusId) return null;
+    const direct = new Set<string>();
+    for (const e of graph.edges) { if (e.source === focusId) direct.add(e.target); if (e.target === focusId) direct.add(e.source); }
+    direct.add(focusId);
+    return direct;
+  }, [neighborFocusMode, graph, snapshot.focusMonadId]);
+
+  const isRecent = useCallback((at?: number) => {
+    if (at == null) return false;
+    const dt = snapshot.tick - at;
+    return dt >= 0 && dt <= (highlightWindowTicks ?? 3);
+  }, [snapshot.tick, highlightWindowTicks]);
+
+  return (
+    <div ref={containerRef} className="mpl-graph-container" style={{ width: width ? `${width}px` : "100%", height: height ? `${height}px` : "100%" }}>
+      <svg className="mpl-graph-svg" width={W} height={H} onWheel={onWheel} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+        <defs>
+          <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" /></marker>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="coloredBlur" /><feMerge><feMergeNode in="coloredBlur" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+        </defs>
+
+        <g transform={`translate(${W / 2 + offset.x}, ${H / 2 + offset.y}) scale(${zoom})`}>
+          {/* Edges */}
+          {graph.edges.map(e => {
+            const a = graph.nodes.find(n => n.id === e.source)!;
+            const b = graph.nodes.find(n => n.id === e.target)!;
+            const dimmed = neighborSet && !(neighborSet.has(a.id) && neighborSet.has(b.id));
+            const pulsing = highlightRules && e.pulse && isRecent(e.pulse.at);
+            return (
+              <line key={e.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className={`mpl-edge ${dimmed ? "mpl-dim" : ""} ${pulsing ? "mpl-edge-pulse" : ""}`} />
+            );
+          })}
+
+          {/* Nodes */}
+          {graph.nodes.map(n => {
+            const dimmed = neighborSet && !neighborSet.has(n.id);
+            const fired = highlightRules && isRecent(n.lastRuleAt);
+            return (
+              <g key={n.id} transform={`translate(${n.x}, ${n.y})`} className="mpl-node" onClick={() => onSelectMonad?.(n.id)}>
+                <circle r={n.radius} className={`mpl-node-circle ${n.active ? "mpl-node-active" : ""} ${dimmed ? "mpl-dim" : ""} ${fired ? "mpl-node-fired" : ""}`} filter={(n.active || fired) ? "url(#glow)" : undefined} />
+                <text className={`mpl-node-label ${dimmed ? "mpl-dim" : ""}`} y={n.radius + 14} textAnchor="middle">{n.label ?? n.id}</text>
+                {fired && n.lastRuleId && (
+                  <g className="mpl-node-badge" transform={`translate(${n.radius * 0.9}, ${-n.radius * 0.9})`}>
+                    <circle r={10} className="mpl-badge-circle" />
+                    <text textAnchor="middle" dominantBaseline="central" className="mpl-badge-text">{n.lastRuleId}</text>
+                  </g>
+                )}
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+    </div>
+  );
+};
+```
+
+---
+
+## 4) `playground/components/StateViewer.tsx`
+
+> Full file (adds toolbar controls for highlights + window size)
+
+```tsx
+// playground/components/StateViewer.tsx
+// Stage 3J — Unified state viewer with Table | Graph toggle + rule highlight controls
+
+import React, { useMemo, useState } from "react";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+import { GraphStateView } from "./GraphStateView";
+
+interface StateViewerProps {
+  snapshot: ExecutionSnapshot;
+  onSelectMonad?: (id: string) => void;
+}
+
+type ViewMode = "table" | "graph";
+
+export const StateViewer: React.FC<StateViewerProps> = ({ snapshot, onSelectMonad }) => {
+  const [mode, setMode] = useState<ViewMode>("table");
+  const [neighborOnly, setNeighborOnly] = useState(false);
+  const [showHighlights, setShowHighlights] = useState(true);
+  const [windowTicks, setWindowTicks] = useState(3);
+
+  const rows = useMemo(() => snapshot.monads.map(m => ({
+    id: String(m.id),
+    neighbors: m.neighbors?.length ?? 0,
+    active: !!(m.active || (snapshot.focusMonadId != null && String(snapshot.focusMonadId) === String(m.id))),
+  })), [snapshot]);
+
+  return (
+    <div className="mpl-state-viewer">
+      <div className="mpl-toolbar">
+        <div className="mpl-seg">
+          <button className={`mpl-btn ${mode === "table" ? "active" : ""}`} onClick={() => setMode("table")}>Table</button>
+          <button className={`mpl-btn ${mode === "graph" ? "active" : ""}`} onClick={() => setMode("graph")}>Graph</button>
+        </div>
+        {mode === "graph" && (
+          <div className="mpl-toolbar-right">
+            <label className="mpl-check"><input type="checkbox" checked={neighborOnly} onChange={e => setNeighborOnly(e.target.checked)} /> Neighbor focus</label>
+            <label className="mpl-check"><input type="checkbox" checked={showHighlights} onChange={e => setShowHighlights(e.target.checked)} /> Rule highlights</label>
+            <label className="mpl-check">Window
+              <select value={windowTicks} onChange={e => setWindowTicks(parseInt(e.target.value))}>
+                <option value={1}>1</option>
+                <option value={3}>3</option>
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+              </select>
+              ticks
+            </label>
+          </div>
+        )}
+      </div>
+
+      {mode === "table" ? (
+        <div className="mpl-table-wrap">
+          <table className="mpl-table">
+            <thead><tr><th>ID</th><th>Neighbors</th><th>Active</th></tr></thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id} onClick={() => onSelectMonad?.(r.id)} className={r.active ? "mpl-row-active" : undefined}>
+                  <td>{r.id}</td><td>{r.neighbors}</td><td>{r.active ? "●" : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="mpl-graph-wrap">
+          <GraphStateView
+            snapshot={snapshot}
+            onSelectMonad={onSelectMonad}
+            neighborFocusMode={neighborOnly}
+            highlightRules={showHighlights}
+            highlightWindowTicks={windowTicks}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/styles/debugger.css`
+
+> Add these at the end (keeps 3I styles intact)
+
+```css
+/* Stage 3J — Rule highlight overlay */
+.mpl-toolbar-right { display: inline-flex; gap: 12px; align-items: center; }
+
+/* Node fired highlight */
+.mpl-node-fired { stroke-width: 2.4; }
+.mpl-node-badge { pointer-events: none; }
+.mpl-badge-circle { fill: #111; stroke: #fff; stroke-width: 1; }
+.mpl-badge-text { font-size: 9px; fill: #fff; font-weight: 600; }
+
+/* Edge pulse animation */
+.mpl-edge-pulse { stroke-dasharray: 6 6; animation: mpl-dash 1.2s linear infinite; }
+@keyframes mpl-dash { to { stroke-dashoffset: -24; } }
+```
+
+---
+
+## 6) Optional: example page (sanity test)
+
+```tsx
+// playground/pages/DebugExample3J.tsx
+import React, { useMemo } from "react";
+import { StateViewer } from "../components/StateViewer";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample3J() {
+  const snapshot: ExecutionSnapshot = useMemo(() => ({
+    tick: 20,
+    monads: [
+      { id: "A", neighbors: ["B", "C"], active: true },
+      { id: "B", neighbors: ["A", "C"] },
+      { id: "C", neighbors: ["A", "B", "D"] },
+      { id: "D", neighbors: ["C"] },
+    ],
+    rulesFired: [
+      { ruleId: "R1", at: 19, monadId: "A" },
+      { ruleId: "R2", at: 20, monadId: "C", sourceId: "C", targetId: "D" },
+    ],
+    focusMonadId: "A",
+  }), []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 3J — Rule Highlight Overlay</h1>
+      <StateViewer snapshot={snapshot} onSelectMonad={(id) => console.log("select", id)} />
+    </div>
+  );
+}
+```
+
+---
+
+## 7) Engine note: populating `rulesFired`
+
+Emit for each tick something like:
+
+```ts
+const rulesFired: RuleFire[] = firesAtTick.map(f => ({
+  ruleId: f.rule.name,   // short label (e.g., "R1") or full id
+  at: currentTick,
+  monadId: f.monadId,
+  sourceId: f.sourceId,  // optional
+  targetId: f.targetId,  // optional
+}));
+```
+
+If you don’t have `sourceId/targetId`, omit them — node glow and badge will still work.
+
+---
+
+## 8) Changelog — Stage 3J
+
+* Extended `graphTypes.ts` with `RuleFire` directional metadata and node/edge overlay fields
+* Enriched `toGraph.ts` to annotate `lastRuleId/lastRuleAt` on nodes and `pulse` on edges
+* Updated `GraphStateView` to render badges and pulsing edges within a decay window
+* Updated `StateViewer` with toggles: **Neighbor focus**, **Rule highlights**, **Window (ticks)**
+* Added CSS animations and badge styles
+
+---
+
+## 9) Next (Stage 3K preview)
+
+* **Time‑travel scrubber** with cached snapshots and seek/play controls
+* Ghost overlay comparing two ticks (A/B visual diff)
+
+Paste these files and you’ll see instant rule‑fire visuals in Graph View. Ready for **3K** when you are.

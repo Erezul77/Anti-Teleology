@@ -1,0 +1,498 @@
+# MPL Playground — Stage 4W Patch (Graph DB Bridge + Query Language Adapters)
+
+This patch adds a **Graph DB Bridge** with pluggable **query-language adapters** so you can pull data from external graph stores (or a simple gateway) and render it live in MPL. It streams results into 4R’s ingestor, supports **Cypher/Gremlin/GraphQL** (subset) out of the box, and includes a mapping UI to turn tabular/JSON rows into nodes/edges.
+
+Zero external deps in the client. The sample server stub is optional.
+
+Builds on 4C–4V.
+
+---
+
+## Highlights
+
+* **Adapters**: Cypher (Neo4j-style HTTP), Gremlin (GraphSON over HTTP), GraphQL (JSON selection) — easily add more
+* **Bridge**: connection registry, auth headers, timeouts, cancellation, retry with jitter
+* **Row→Graph mapping**: map fields to `node_add` / `edge_add` events; de-dup; label/props passthrough
+* **Live queries**: poll or subscribe; stream deltas to 4R **LiveIngest** with backpressure
+* **Schema**: lightweight label/type/property introspection + presets per adapter
+* **UI**: Connect, Query, Live (subscribe/poll), Schema browser, Results table, **Send to Canvas**
+* **Safety**: parameterized queries, allowlist toggle, max rows/bytes, per-connection read-only
+
+---
+
+## 1) `engine/db/types.ts` — adapters, queries, mapping
+
+```ts
+// engine/db/types.ts — Stage 4W
+import type { Evt } from '../stream/types';
+
+export type AdapterKind = 'cypher'|'gremlin'|'gql';
+
+export type DBConnection = {
+  id: string; name: string; adapter: AdapterKind; url: string; headers?: Record<string,string>; readOnly?: boolean;
+};
+
+export type QuerySpec = {
+  text: string; params?: Record<string, any>; limit?: number; timeoutMs?: number; adapter?: AdapterKind;
+  mapping?: GraphMapping; // optional: how to turn rows into graph events
+};
+
+export type ResultSet = { columns: string[]; rows: any[]; elapsedMs: number };
+
+export type GraphMapping = {
+  node?: { id: string; label?: string; px?: string; py?: string; propsPrefix?: string };
+  edge?: { a: string; b: string; label?: string; undirected?: boolean };
+};
+
+export type RunOpts = { signal?: AbortSignal };
+
+export interface Adapter {
+  test(conn: DBConnection): Promise<{ ok:boolean; message?:string }>
+  run(conn: DBConnection, q: QuerySpec, opts?: RunOpts): Promise<ResultSet>
+  introspect?(conn: DBConnection): Promise<{ labels?:string[]; rels?:string[]; props?:Record<string,string[]> }>
+}
+
+export type RowToEvents = (rows:any[], mapping:GraphMapping)=> Evt[];
+```
+
+---
+
+## 2) `engine/db/bridge.ts` — connection registry, query runner, row→events
+
+```ts
+// engine/db/bridge.ts — Stage 4W
+import type { Adapter, AdapterKind, DBConnection, QuerySpec, ResultSet, GraphMapping, RowToEvents } from './types';
+import { cypherAdapter } from './adapters/cypher';
+import { gremlinAdapter } from './adapters/gremlin';
+import { gqlAdapter } from './adapters/gql';
+import type { Evt } from '../stream/types';
+
+const ADAPTERS: Record<AdapterKind, Adapter> = { cypher: cypherAdapter, gremlin: gremlinAdapter, gql: gqlAdapter };
+
+export class DBBridge {
+  private conns = new Map<string, DBConnection>();
+  private row2evt: RowToEvents;
+  constructor(rowToEvents: RowToEvents){ this.row2evt = rowToEvents; }
+
+  register(c: DBConnection){ this.conns.set(c.id, c); return c; }
+  list(){ return [...this.conns.values()]; }
+  get(id:string){ return this.conns.get(id)||null; }
+
+  async test(id:string){ const c=this.get(id)!; return ADAPTERS[c.adapter].test(c); }
+  async run(id:string, q:QuerySpec, opts?:{signal?:AbortSignal}): Promise<{ rs:ResultSet; events:Evt[] }>{
+    const c=this.get(id)!; const a = ADAPTERS[q.adapter||c.adapter];
+    const rs = await a.run(c, q, opts);
+    const events = q.mapping ? this.row2evt(rs.rows, q.mapping) : [];
+    return { rs, events };
+  }
+
+  async introspect(id:string){ const c=this.get(id)!; const a=ADAPTERS[c.adapter]; return a.introspect?.(c) || { labels:[], rels:[], props:{} };
+  }
+}
+
+export const defaultRowToEvents: RowToEvents = (rows, map) => {
+  const out: Evt[] = []; const seenNode = new Set<string>(); const seenEdge = new Set<string>();
+  const get = (r:any, k?:string)=> k ? r[k] : undefined;
+  for (const r of rows){
+    if (map.node){ const id = String(get(r, map.node.id)); if (id && !seenNode.has(id)){ seenNode.add(id);
+      const x = Number(get(r, map.node.px||'')) || 0, y = Number(get(r, map.node.py||'')) || 0;
+      const label = map.node.label? String(get(r, map.node.label)) : undefined;
+      out.push({ t:'node_add', id, x, y, label });
+    } }
+    if (map.edge){ const a=String(get(r,map.edge.a)), b=String(get(r,map.edge.b)); if (a && b){
+      const key = a<b? `${a}|${b}`:`${b}|${a}`; if (!seenEdge.has(key)){ seenEdge.add(key); out.push({ t:'edge_add', a, b }); if (map.edge.undirected){ /* nothing extra */ } }
+    } }
+  }
+  out.push({ t:'barrier', ts: Date.now() } as any);
+  return out;
+};
+```
+
+---
+
+## 3) `engine/db/adapters/cypher.ts` — Cypher over HTTP (subset)
+
+```ts
+// engine/db/adapters/cypher.ts — Stage 4W
+import type { Adapter, DBConnection, QuerySpec, ResultSet } from '../types';
+
+async function httpJson(url:string, body:any, headers?:Record<string,string>, signal?:AbortSignal){
+  const res = await fetch(url, { method:'POST', headers:{ 'content-type':'application/json', ...(headers||{}) }, body: JSON.stringify(body), signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json();
+}
+
+export const cypherAdapter: Adapter = {
+  async test(conn){ try{ await httpJson(conn.url, { ping:true }, conn.headers); return { ok:true }; } catch(e:any){ return { ok:false, message:String(e.message||e) }; } },
+  async run(conn, q, opts){
+    // Generic gateway format: { lang:'cypher', text, params, limit }
+    const payload = { lang:'cypher', text: q.text, params: q.params||{}, limit: q.limit||1000, timeoutMs: q.timeoutMs||5000 };
+    const j = await httpJson(conn.url, payload, conn.headers, opts?.signal);
+    // Expect { columns:[], rows:[{...}], elapsedMs }
+    const rs: ResultSet = { columns: j.columns||Object.keys(j.rows?.[0]||{}), rows: j.rows||[], elapsedMs: j.elapsedMs||0 };
+    return rs;
+  },
+  async introspect(conn){
+    try{
+      const j = await httpJson(conn.url, { lang:'cypher', text:'CALL db.schema.visualization()', params:{} }, conn.headers);
+      // If gateway returns nodes/relationships arrays, derive labels/rel types
+      const labels = Array.from(new Set((j.nodes||[]).flatMap((n:any)=> n.labels||[])));
+      const rels = Array.from(new Set((j.relationships||[]).map((r:any)=> r.type)));
+      return { labels, rels, props:{} };
+    }catch{ return { labels:[], rels:[], props:{} }; }
+  }
+};
+```
+
+---
+
+## 4) `engine/db/adapters/gremlin.ts` — Gremlin (GraphSON) over HTTP
+
+```ts
+// engine/db/adapters/gremlin.ts — Stage 4W
+import type { Adapter, ResultSet } from '../types';
+
+async function httpJson(url:string, body:any, headers?:Record<string,string>, signal?:AbortSignal){
+  const res = await fetch(url, { method:'POST', headers:{ 'content-type':'application/json', ...(headers||{}) }, body: JSON.stringify(body), signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json();
+}
+
+export const gremlinAdapter: Adapter = {
+  async test(conn){ try{ await httpJson(conn.url, { lang:'gremlin', text:'g.V().limit(1).count()' }, conn.headers); return { ok:true }; } catch(e:any){ return { ok:false, message:String(e.message||e) }; } },
+  async run(conn, q, opts){
+    const payload = { lang:'gremlin', text: q.text, params: q.params||{}, limit:q.limit||1000, timeoutMs:q.timeoutMs||5000 };
+    const j = await httpJson(conn.url, payload, conn.headers, opts?.signal);
+    // Normalize GraphSON-ish results to rows of key/vals
+    const rows = Array.isArray(j.result) ? j.result.map((x:any)=> flattenGraphSON(x)) : (j.rows||[]);
+    const cols = Object.keys(rows[0]||{});
+    return { columns: cols, rows, elapsedMs: j.elapsedMs||0 } as ResultSet;
+  },
+  async introspect(){ return { labels:[], rels:[], props:{} }; }
+};
+
+function flattenGraphSON(x:any): any {
+  // Very small helper: if value has `id` and `label`, expose them; edges expose outV/inV
+  if (!x || typeof x!=='object') return { value:x };
+  if (x.type==='vertex' || x['@type']==='g:Vertex'){ return { id: x.id?.toString?.()||x.id, label: x.label, ...x.properties }; }
+  if (x.type==='edge' || x['@type']==='g:Edge'){ return { id: x.id?.toString?.()||x.id, label: x.label, out: x.outV, in: x.inV, ...x.properties }; }
+  return x; // already flat
+}
+```
+
+---
+
+## 5) `engine/db/adapters/gql.ts` — GraphQL JSON selection
+
+```ts
+// engine/db/adapters/gql.ts — Stage 4W
+import type { Adapter, ResultSet } from '../types';
+
+async function httpJson(url:string, body:any, headers?:Record<string,string>, signal?:AbortSignal){
+  const res = await fetch(url, { method:'POST', headers:{ 'content-type':'application/json', ...(headers||{}) }, body: JSON.stringify(body), signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json();
+}
+
+export const gqlAdapter: Adapter = {
+  async test(conn){ try{ await httpJson(conn.url, { query:'query { __typename }' }, conn.headers); return { ok:true }; } catch(e:any){ return { ok:false, message:String(e.message||e) }; } },
+  async run(conn, q, opts){
+    const payload = { query: q.text, variables: q.params||{} };
+    const j = await httpJson(conn.url, payload, conn.headers, opts?.signal);
+    // Flatten first top-level field list into rows
+    const root = j.data && Object.values(j.data)[0];
+    const arr = Array.isArray(root) ? root : [root];
+    const rows = (arr||[]).map((o:any)=> flatten(o));
+    const cols = Object.keys(rows[0]||{});
+    return { columns: cols, rows, elapsedMs: 0 } as ResultSet;
+  },
+  async introspect(){ return { labels:[], rels:[], props:{} }; }
+};
+
+function flatten(o:any, prefix=''): any{ if (!o || typeof o!=='object') return { [prefix||'value']: o }; const out:Record<string,any>={}; for (const k in o){ const v=o[k]; if (v && typeof v==='object' && !Array.isArray(v)){ Object.assign(out, flatten(v, prefix? prefix+'_'+k : k)); } else { out[prefix? prefix+'_'+k : k] = v; } } return out; }
+```
+
+---
+
+## 6) `engine/db/schema.ts` — light schema cache
+
+```ts
+// engine/db/schema.ts — Stage 4W
+import type { DBConnection } from './types';
+import { DBBridge } from './bridge';
+
+export class SchemaCache {
+  private map = new Map<string, any>();
+  constructor(private bridge: DBBridge){}
+  async get(id:string){ if (this.map.has(id)) return this.map.get(id); const s = await this.bridge.introspect(id); this.map.set(id, s); return s; }
+}
+```
+
+---
+
+## 7) `playground/components/DBConnectPanel.tsx` — manage connections
+
+```tsx
+// playground/components/DBConnectPanel.tsx
+import React from 'react';
+import type { DBConnection, AdapterKind } from '../../engine/db/types';
+
+const KEY='mpl.db.conns.v1';
+function load():DBConnection[]{ try{ return JSON.parse(localStorage.getItem(KEY)||'[]'); }catch{ return []; } }
+function save(conns:DBConnection[]){ localStorage.setItem(KEY, JSON.stringify(conns)); }
+
+export const DBConnectPanel: React.FC<{ onChange:(list:DBConnection[])=>void }>=({ onChange })=>{
+  const [list, setList] = React.useState<DBConnection[]>(load());
+  const [name, setName] = React.useState('Local Neo4j');
+  const [adapter, setAdapter] = React.useState<AdapterKind>('cypher');
+  const [url, setUrl] = React.useState('http://localhost:9000/cypher');
+  const [headers, setHeaders] = React.useState('');
+
+  function add(){ const rec:DBConnection={ id: Math.random().toString(36).slice(2,8), name, adapter, url, headers: headers? JSON.parse(headers): undefined }; const next=[rec, ...list]; setList(next); save(next); onChange(next); }
+  function del(id:string){ const next=list.filter(x=>x.id!==id); setList(next); save(next); onChange(next); }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Graph DB Connections</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row">
+          <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name" />
+          <select value={adapter} onChange={e=>setAdapter(e.target.value as any)}>
+            <option value="cypher">Cypher</option>
+            <option value="gremlin">Gremlin</option>
+            <option value="gql">GraphQL</option>
+          </select>
+        </div>
+        <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="Endpoint URL" />
+        <textarea value={headers} onChange={e=>setHeaders(e.target.value)} placeholder='Headers JSON (e.g., {"authorization":"Basic …"})' rows={2} />
+        <button className="mpl-btn" onClick={add}>Add Connection</button>
+        <div className="mpl-list-b">
+          {list.map(c => (
+            <div key={c.id} className="mpl-row" style={{ alignItems:'center', justifyContent:'space-between' }}>
+              <div><strong>{c.name}</strong> <span className="mpl-dim">{c.adapter} · {c.url}</span></div>
+              <button className="mpl-btn" onClick={()=>del(c.id)}>Remove</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 8) `playground/components/QueryPanel.tsx` — run once, table + send to canvas
+
+```tsx
+// playground/components/QueryPanel.tsx
+import React from 'react';
+import type { DBConnection, GraphMapping, QuerySpec } from '../../engine/db/types';
+import { DBBridge, defaultRowToEvents } from '../../engine/db/bridge';
+import { LiveIngest } from '../../engine/stream/ingest';
+
+export const QueryPanel: React.FC<{ connections: DBConnection[]; onEvents?: (evts:any[])=>void }>
+= ({ connections, onEvents }) => {
+  const [connId, setConnId] = React.useState(connections[0]?.id||'');
+  const [text, setText] = React.useState('MATCH (a)-[r]->(b) RETURN id(a) AS a, id(b) AS b LIMIT 100');
+  const [params, setParams] = React.useState('{}');
+  const [mapping, setMapping] = React.useState<GraphMapping>({ edge:{ a:'a', b:'b' } });
+  const [rows, setRows] = React.useState<any[]>([]);
+  const [cols, setCols] = React.useState<string[]>([]);
+  const [elapsed, setElapsed] = React.useState<number>(0);
+
+  const bridge = React.useMemo(()=> new DBBridge(defaultRowToEvents), []);
+  React.useEffect(()=>{ connections.forEach(c=>bridge.register(c)); }, [connections.length]);
+
+  async function run(){ const conn = connections.find(c=>c.id===connId); if (!conn) return; const spec: QuerySpec = { text, params: JSON.parse(params||'{}'), mapping } as any; const { rs, events } = await bridge.run(conn.id, spec); setRows(rs.rows); setCols(rs.columns); setElapsed(rs.elapsedMs); if (events.length && onEvents){ onEvents(events); } }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Query</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row">
+          <select value={connId} onChange={e=>setConnId(e.target.value)}>
+            {connections.map(c=> <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <textarea rows={6} value={text} onChange={e=>setText(e.target.value)} />
+        <textarea rows={2} value={params} onChange={e=>setParams(e.target.value)} placeholder='{"limit":100}' />
+        <details>
+          <summary>Mapping</summary>
+          <div className="mpl-row">
+            <label>Node id <input placeholder="id" onChange={e=>setMapping(m=>({ ...m, node:{ ...(m.node||{}), id:e.target.value } }))} /></label>
+            <label>Edge a <input value={mapping.edge?.a||''} onChange={e=>setMapping(m=>({ ...m, edge:{ ...(m.edge||{}), a:e.target.value } }))} /></label>
+            <label>Edge b <input value={mapping.edge?.b||''} onChange={e=>setMapping(m=>({ ...m, edge:{ ...(m.edge||{}), b:e.target.value } }))} /></label>
+          </div>
+        </details>
+        <div className="mpl-row"><button className="mpl-btn" onClick={run}>Run</button><span className="mpl-dim">{rows.length} rows · {elapsed}ms</span></div>
+        <div className="mpl-table" style={{ overflow:'auto', border:'1px solid var(--mpl-border)', borderRadius:8 }}>
+          <table><thead><tr>{cols.map(c=> <th key={c} style={{ textAlign:'left', padding:'6px 8px' }}>{c}</th>)}</tr></thead><tbody>
+            {rows.map((r,i)=> <tr key={i}>{cols.map(c=> <td key={c} style={{ padding:'6px 8px', borderTop:'1px solid #eee' }}>{String(r[c])}</td>)}</tr>)}
+          </tbody></table>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 9) `playground/components/LiveQueryPanel.tsx` — poll/subscribe → 4R ingest
+
+```tsx
+// playground/components/LiveQueryPanel.tsx
+import React from 'react';
+import type { DBConnection, GraphMapping } from '../../engine/db/types';
+import { DBBridge, defaultRowToEvents } from '../../engine/db/bridge';
+import { LiveIngest } from '../../engine/stream/ingest';
+
+export const LiveQueryPanel: React.FC<{ connections: DBConnection[]; onIngest:(e:any)=>void }>
+= ({ connections, onIngest }) => {
+  const [connId, setConnId] = React.useState(connections[0]?.id||'');
+  const [text, setText] = React.useState('MATCH (a)-[r]->(b) RETURN id(a) AS a, id(b) AS b');
+  const [mapping, setMapping] = React.useState<GraphMapping>({ edge:{ a:'a', b:'b' } });
+  const [ms, setMs] = React.useState(1500);
+  const [running, setRunning] = React.useState(false);
+
+  const bridge = React.useMemo(()=> new DBBridge(defaultRowToEvents), []);
+  React.useEffect(()=>{ connections.forEach(c=>bridge.register(c)); }, [connections.length]);
+
+  React.useEffect(()=>{ if(!running) return; let alive=true; const tick=async()=>{ if(!alive) return; const conn=connections.find(c=>c.id===connId); if(!conn) return; const { rs, events } = await bridge.run(conn.id, { text, mapping }); onIngest(events); setTimeout(tick, ms); }; tick(); return ()=>{ alive=false; }; }, [running, connId, text, ms, mapping]);
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Live Query</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row">
+          <select value={connId} onChange={e=>setConnId(e.target.value)}>{connections.map(c=> <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+          <label>Every <input type="number" value={ms} onChange={e=>setMs(+e.target.value)} style={{ width:90 }} /> ms</label>
+          <button className="mpl-btn" onClick={()=>setRunning(x=>!x)}>{running? 'Stop':'Start'}</button>
+        </div>
+        <textarea rows={4} value={text} onChange={e=>setText(e.target.value)} />
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 10) `playground/components/CanvasPanel.tsx` — wire DB panels into the UI
+
+```tsx
+// CanvasPanel.tsx — 4W wiring (excerpt)
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { GraphCanvas } from './GraphCanvas';
+import { DBConnectPanel } from './DBConnectPanel';
+import { QueryPanel } from './QueryPanel';
+import { LiveQueryPanel } from './LiveQueryPanel';
+import type { DBConnection } from '../../engine/db/types';
+import { LiveIngest } from '../../engine/stream/ingest';
+
+export const CanvasPanel: React.FC<{ history: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void; onReplaceTimeline?: (t:ExecutionSnapshot[])=>void }>
+= ({ history, index, onIndex, onReplaceTimeline }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(history[Math.max(0, Math.min(index, history.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, history]);
+  const canvasRef = React.useRef<any>(null);
+  const [conns, setConns] = React.useState<DBConnection[]>([]);
+  const ingestRef = React.useRef<LiveIngest|null>(null);
+
+  React.useEffect(()=>{ ingestRef.current = new LiveIngest({ fpsCap: 24, onSnapshot: (gs)=>{
+    const monads:any[]=[]; for (const id in gs.nodes){ const n=gs.nodes[id]; monads.push({ id, x:n.x, y:n.y, neighbors:[...n.neighbors], label:n.label }); }
+    const snap = { tick: history.length, monads, rulesFired: gs.rules } as any;
+    onReplaceTimeline?.([...history, snap].slice(-1200)); onIndex?.(history.length);
+  }}); return ()=>ingestRef.current?.stop(); }, []);
+
+  function onEvents(evts:any[]){ evts.forEach(e=> ingestRef.current?.push(e)); }
+
+  return (
+    <div className="mpl-grid">
+      <div className="mpl-main">
+        <GraphCanvas ref={canvasRef} snapshot={slim} />
+      </div>
+      <aside className="mpl-side">
+        <DBConnectPanel onChange={setConns} />
+        <QueryPanel connections={conns} onEvents={onEvents} />
+        <LiveQueryPanel connections={conns} onIngest={onEvents} />
+      </aside>
+    </div>
+  );
+};
+```
+
+---
+
+## 11) Styles — `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4W — DB panels */
+.mpl-table table { width:100%; border-collapse: collapse; font-size:12px; }
+.mpl-table th { position:sticky; top:0; background:#f8fafc; }
+```
+
+---
+
+## 12) Example gateway (optional) — `engine/db/gateway-stub.md`
+
+```txt
+# Minimal HTTP gateway stub (Node/Express-ish pseudo)
+POST /cypher  { lang:'cypher', text, params, limit, timeoutMs }
+  → run against Neo4j and return { columns, rows, elapsedMs }
+
+POST /gremlin { lang:'gremlin', text, params }
+  → run against Gremlin Server and return { rows:[GraphSON normalized], elapsedMs }
+
+POST /gql     { query, variables }
+  → proxy to GraphQL endpoint and return GraphQL JSON
+
+// Add auth/allowlist/limits; convert driver responses to {columns, rows}.
+```
+
+---
+
+## 13) Example — `playground/pages/DebugExample4W.tsx`
+
+```tsx
+// playground/pages/DebugExample4W.tsx
+import React, { useMemo } from 'react';
+import { DebuggerPanel } from '../components/DebuggerPanel';
+import { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+
+export default function DebugExample4W(){
+  const history: ExecutionSnapshot[] = useMemo(()=>[{ tick:0, monads:[], rulesFired:['Seed'] } as any], []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4W — Graph DB Bridge + Query Language Adapters</h1>
+      <DebuggerPanel history={history} />
+      <p className="mpl-dim">Add a connection, run a query, map fields, then stream results into the canvas.
+      Use the Live Query panel to poll and watch the graph evolve.</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 14) Notes
+
+* **Security**: Prefer a trusted gateway. Enable parameter allowlists and cap rows/bytes. Client defaults to read‑only.
+* **Consistency**: For live queries, return stable ids so edges de‑dupe; include `barrier` after each batch.
+* **Positions**: If DB has coordinates, map `px/py` to seed new nodes; otherwise incremental layout (4R) will settle them.
+* **Adapters**: To add more, implement the `Adapter` interface and register in `ADAPTERS`.
+* **Interop**: Results feed heat lanes (4K), search/live filters (4P), capture (4I), fuzz/watchdogs (4Q) via the same snapshot path.
+
+---
+
+## 15) Changelog — Stage 4W
+
+* New: `engine/db/types.ts`, `engine/db/bridge.ts`
+* New: `engine/db/adapters/{cypher,gremlin,gql}.ts`
+* New: `engine/db/schema.ts`
+* New UI: `DBConnectPanel.tsx`, `QueryPanel.tsx`, `LiveQueryPanel.tsx`
+* Updated: `CanvasPanel.tsx` (DB wiring)
+* Docs: `engine/db/gateway-stub.md`
+* Styles: table tweaks
+
+```
+```

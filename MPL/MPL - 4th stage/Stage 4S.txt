@@ -1,0 +1,481 @@
+# MPL Playground — Stage 4S Patch (Snapshot Diffing + Regression Baselines + Golden Tests)
+
+This patch adds **structural + visual diffing**, **saved baselines**, and a **golden test runner** so you can spot regressions quickly and gate changes — all building on 4C–4R.
+
+Zero external deps.
+
+---
+
+## Highlights
+
+* **Snapshot diff**: added/removed nodes & edges, label changes, and **layout drift metrics** (mean/p50/p95/max px)
+* **Visual diff** (optional): render two snapshots offscreen → **pixel diff %** and a heatmap image
+* **Baselines**: save current snapshot (and optional PNG), list/manage/import/export, compare against
+* **Golden tests**: define scenarios (seed + generator), thresholds (structural + drift + pixel%), **run all**, export JSON report
+* **Overlays**: colorize **adds** (green)/**removals** (red), with ghost marks for removed elements
+
+---
+
+## 1) `engine/diff/snapshot.ts` — structure + drift
+
+```ts
+// engine/diff/snapshot.ts — Stage 4S
+import type { SnapshotSlim } from '../core/perf/timelineDelta';
+
+export type GraphIndex = {
+  nodes: Set<string>;
+  edges: Set<string>; // key = a<b ? "a|b" : "b|a"
+  label: Record<string,string|undefined>;
+  pos: Record<string,{x:number;y:number}>;
+};
+
+export function edgeKey(a:string,b:string){ return a<b? `${a}|${b}` : `${b}|${a}`; }
+
+export function indexSnapshot(s: SnapshotSlim): GraphIndex {
+  const nodes = new Set<string>(); const edges = new Set<string>(); const label:Record<string,string|undefined> = {}; const pos: any = {};
+  for (const id in s.monads){ nodes.add(id); const m = (s.monads as any)[id]; label[id] = m.label; pos[id] = { x:m.x||0, y:m.y||0 }; const nb = m.neighbors||[]; for (const t of nb){ if (id<t) edges.add(edgeKey(id,t)); }
+  }
+  return { nodes, edges, label, pos };
+}
+
+export type StructDiff = {
+  addedNodes: string[]; removedNodes: string[];
+  addedEdges: string[]; removedEdges: string[];
+  labelChanged: Array<{ id:string; a?:string; b?:string }>;
+};
+
+export function diffStructure(a: SnapshotSlim, b: SnapshotSlim): StructDiff {
+  const A = indexSnapshot(a), B = indexSnapshot(b);
+  const addedNodes = [...B.nodes].filter(x=>!A.nodes.has(x));
+  const removedNodes = [...A.nodes].filter(x=>!B.nodes.has(x));
+  const addedEdges = [...B.edges].filter(x=>!A.edges.has(x));
+  const removedEdges = [...A.edges].filter(x=>!B.edges.has(x));
+  const labelChanged: Array<{id:string;a?:string;b?:string}> = [];
+  for (const id of new Set([...A.nodes, ...B.nodes])){
+    if ((A.label[id]||'') !== (B.label[id]||'')) labelChanged.push({ id, a: A.label[id], b: B.label[id] });
+  }
+  return { addedNodes, removedNodes, addedEdges, removedEdges, labelChanged };
+}
+
+export type DriftStats = { count:number; mean:number; p50:number; p95:number; max:number };
+
+export function drift(a: SnapshotSlim, b: SnapshotSlim): DriftStats {
+  const A = indexSnapshot(a), B = indexSnapshot(b); const ds:number[]=[];
+  for (const id of A.nodes){ if (!B.nodes.has(id)) continue; const pa=A.pos[id], pb=B.pos[id]; const dx=pb.x-pa.x, dy=pb.y-pa.y; ds.push(Math.hypot(dx,dy)); }
+  ds.sort((x,y)=>x-y); const n=ds.length||1; const p=(q:number)=> ds[Math.min(n-1, Math.floor(q*(n-1)))];
+  return { count:n, mean: ds.reduce((s,x)=>s+x,0)/n, p50:p(0.5), p95:p(0.95), max: ds[n-1]||0 };
+}
+```
+
+---
+
+## 2) `engine/diff/image.ts` — offscreen render + pixel diff
+
+```ts
+// engine/diff/image.ts — Stage 4S
+import type { SnapshotSlim } from '../core/perf/timelineDelta';
+
+export function renderSnapshotToCanvas(s: SnapshotSlim, w=640, h=400){
+  const c = document.createElement('canvas'); c.width=w; c.height=h; const ctx=c.getContext('2d')!;
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h); ctx.strokeStyle='#d1d5db'; ctx.lineWidth=1;
+  const cam = fitCam(s, w, h);
+  const toXY=(p:any)=>({ x: (p.x-cam.minX)*cam.sx + 20, y: (p.y-cam.minY)*cam.sy + 20 });
+  // edges
+  for (const id in s.monads){ const a:any = (s.monads as any)[id]; for (const t of a.neighbors||[]){ if (id>=t) continue; const A=toXY(a), B=toXY((s.monads as any)[t]); ctx.beginPath(); ctx.moveTo(A.x,A.y); ctx.lineTo(B.x,B.y); ctx.stroke(); }
+  }
+  // nodes
+  ctx.fillStyle='#111827';
+  for (const id in s.monads){ const p:any=(s.monads as any)[id]; const P=toXY(p); ctx.beginPath(); ctx.arc(P.x,P.y,2,0,6.283); ctx.fill(); }
+  return c;
+}
+
+function fitCam(s: SnapshotSlim, w:number, h:number){ let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity; for (const id in s.monads){ const p:any=(s.monads as any)[id]; minX=Math.min(minX,p.x||0); minY=Math.min(minY,p.y||0); maxX=Math.max(maxX,p.x||0); maxY=Math.max(maxY,p.y||0); } const pad=20; const sx=(w-40)/Math.max(1,maxX-minX||1); const sy=(h-40)/Math.max(1,maxY-minY||1); return { minX, minY, sx, sy } }
+
+export function pixelDiff(a: HTMLCanvasElement, b: HTMLCanvasElement, thresh=24){
+  const w=Math.max(a.width,b.width), h=Math.max(a.height,b.height);
+  const A = document.createElement('canvas'); A.width=w; A.height=h; const B = document.createElement('canvas'); B.width=w; B.height=h; const D = document.createElement('canvas'); D.width=w; D.height=h;
+  const ca=A.getContext('2d')!, cb=B.getContext('2d')!, cd=D.getContext('2d')!;
+  ca.drawImage(a,0,0); cb.drawImage(b,0,0);
+  const da=ca.getImageData(0,0,w,h), db=cb.getImageData(0,0,w,h), dd=cd.createImageData(w,h);
+  let diff=0; for (let i=0;i<da.data.length;i+=4){ const dr=da.data[i]-db.data[i], dg=da.data[i+1]-db.data[i+1], dbv=da.data[i+2]-db.data[i+2]; const d = Math.abs(dr)+Math.abs(dg)+Math.abs(dbv); if (d>thresh){ dd.data[i]=255; dd.data[i+1]=0; dd.data[i+2]=0; dd.data[i+3]=160; diff++; } else { dd.data[i+3]=0; } }
+  cd.putImageData(dd,0,0);
+  const pixels = w*h; const pct = (diff/pixels)*100;
+  return { percent: pct, heatmap: D };
+}
+```
+
+---
+
+## 3) `engine/diff/baselines.ts` — saved baselines
+
+```ts
+// engine/diff/baselines.ts — Stage 4S
+import type { SnapshotSlim } from '../core/perf/timelineDelta';
+
+export type Baseline = { id:string; name:string; createdAt:string; notes?:string; snap: SnapshotSlim; png?: string };
+const KEY='mpl.baselines.v1';
+
+export function loadBaselines(): Baseline[]{ try{ const raw=localStorage.getItem(KEY); return raw? JSON.parse(raw):[]; }catch{ return []; } }
+export function saveBaselines(list: Baseline[]){ try{ localStorage.setItem(KEY, JSON.stringify(list)); }catch{} }
+export function addBaseline(b: Baseline){ const list=loadBaselines(); list.unshift(b); saveBaselines(list); return list; }
+export function removeBaseline(id:string){ const list=loadBaselines().filter(x=>x.id!==id); saveBaselines(list); return list; }
+
+export function createBaseline(name:string, snap: SnapshotSlim, notes?:string, png?:string): Baseline{
+  return { id: Math.random().toString(36).slice(2,8), name, createdAt: new Date().toISOString(), notes, snap, png };
+}
+
+export function exportBaselines(){ const blob=new Blob([JSON.stringify(loadBaselines(),null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='baselines.mpl.json'; a.click(); URL.revokeObjectURL(a.href); }
+export async function importBaselines(): Promise<Baseline[]|null>{ return new Promise(res=>{ const i=document.createElement('input'); i.type='file'; i.accept='.json,application/json'; i.onchange=()=>{ const f=i.files?.[0]; if(!f) return res(null); const r=new FileReader(); r.onload=()=>{ try{ const list=JSON.parse(String(r.result)); saveBaselines(list); res(list); }catch{ res(null); } }; r.readAsText(f); }; i.click(); }); }
+```
+
+---
+
+## 4) `playground/components/BaselinePanel.tsx` — save/manage/compare
+
+```tsx
+// playground/components/BaselinePanel.tsx
+import React from 'react';
+import type { SnapshotSlim } from '../../engine/core/perf/timelineDelta';
+import { createBaseline, addBaseline, loadBaselines, removeBaseline, exportBaselines, importBaselines } from '../../engine/diff/baselines';
+import { renderSnapshotToCanvas } from '../../engine/diff/image';
+
+export const BaselinePanel: React.FC<{ current: SnapshotSlim; onCompare:(baseId:string)=>void }>
+= ({ current, onCompare }) => {
+  const [name,setName] = React.useState('Baseline');
+  const [notes,setNotes] = React.useState('');
+  const [list,setList] = React.useState(()=>loadBaselines());
+
+  function save(){ let png: string|undefined; try{ const c=renderSnapshotToCanvas(current, 480, 320); png=c.toDataURL('image/png'); }catch{} const b=createBaseline(name, current, notes, png); setList(addBaseline(b)); setName('Baseline'); setNotes(''); }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Baselines</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name" />
+        <textarea value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Notes (optional)" rows={2} />
+        <div className="mpl-row"><button className="mpl-btn" onClick={save}>Save current snapshot</button><button className="mpl-btn" onClick={exportBaselines}>Export</button><button className="mpl-btn" onClick={async()=>{ const l=await importBaselines(); if(l) setList(l); }}>Import</button></div>
+        <div className="mpl-list-b">
+          {list.map(b => (
+            <div key={b.id} className="mpl-baseline">
+              {b.png ? <img src={b.png} alt="thumb" style={{ width:96,height:64,objectFit:'cover',borderRadius:8,border:'1px solid var(--mpl-border)' }} /> : <div style={{width:96,height:64,background:'#f3f4f6',borderRadius:8}} />}
+              <div className="mpl-col">
+                <strong>{b.name}</strong>
+                <div className="mpl-dim">{new Date(b.createdAt).toLocaleString()}</div>
+              </div>
+              <div className="mpl-row" style={{ marginLeft:'auto' }}>
+                <button className="mpl-btn" onClick={()=>onCompare(b.id)}>Compare</button>
+                <button className="mpl-btn" onClick={()=>setList(removeBaseline(b.id))}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 5) `playground/components/DiffOverlay.tsx` — colorize adds/removals
+
+```tsx
+// playground/components/DiffOverlay.tsx
+import React from 'react';
+
+export const DiffOverlay: React.FC<{
+  addedNodes: Array<{id:string,x:number,y:number}>;
+  removedNodes: Array<{id:string,x:number,y:number}>;
+  addedEdges: Array<[number,number,number,number]>; // [x1,y1,x2,y2]
+  removedEdges: Array<[number,number,number,number]>;
+}>
+= ({ addedNodes, removedNodes, addedEdges, removedEdges }) => {
+  return (
+    <svg className="mpl-diff" style={{ position:'absolute', inset:0, pointerEvents:'none' }}>
+      {addedEdges.map((e,i)=> <line key={'ae'+i} x1={e[0]} y1={e[1]} x2={e[2]} y2={e[3]} stroke="#22c55e" strokeWidth={2} strokeOpacity={0.9} />)}
+      {removedEdges.map((e,i)=> <line key={'re'+i} x1={e[0]} y1={e[1]} x2={e[2]} y2={e[3]} stroke="#ef4444" strokeWidth={2} strokeOpacity={0.7} strokeDasharray="4 3" />)}
+      {addedNodes.map((p,i)=> <circle key={'an'+i} cx={p.x} cy={p.y} r={4} fill="#16a34a" />)}
+      {removedNodes.map((p,i)=> <g key={'rn'+i} transform={`translate(${p.x},${p.y})`}>
+        <circle r={5} fill="none" stroke="#ef4444" strokeWidth={2} />
+        <line x1={-5} y1={-5} x2={5} y2={5} stroke="#ef4444" />
+        <line x1={-5} y1={5} x2={5} y2={-5} stroke="#ef4444" />
+      </g>)}
+    </svg>
+  );
+};
+```
+
+---
+
+## 6) `playground/components/DiffPanel.tsx` — compute + show diff
+
+```tsx
+// playground/components/DiffPanel.tsx
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { diffStructure, drift, indexSnapshot } from '../../engine/diff/snapshot';
+import { renderSnapshotToCanvas, pixelDiff } from '../../engine/diff/image';
+import { DiffOverlay } from './DiffOverlay';
+
+export const DiffPanel: React.FC<{
+  history: ExecutionSnapshot[];
+  index: number;                          // current tick
+  onOverlayReady?: (overlay: JSX.Element|null) => void;
+}>
+= ({ history, index, onOverlayReady }) => {
+  const [mode, setMode] = React.useState<'baseline'|'ticks'>('ticks');
+  const [tickA, setTickA] = React.useState(Math.max(0,index-1));
+  const [tickB, setTickB] = React.useState(index);
+  const [baseline, setBaseline] = React.useState<any>(null);
+  const [pix, setPix] = React.useState<{ percent:number }|null>(null);
+  const [struct, setStruct] = React.useState<any>(null);
+  const [dr, setDr] = React.useState<any>(null);
+
+  React.useEffect(()=>{
+    const A = toSlim(history[Math.max(0, Math.min(tickA, history.length-1))] as any);
+    const B = mode==='ticks' ? toSlim(history[Math.max(0, Math.min(tickB, history.length-1))] as any) : (baseline?.snap || A);
+    const s = diffStructure(A as any, B as any); setStruct(s); setDr(drift(A as any, B as any));
+    // overlay projection (screen space approximated by fit-to-canvas used in image.ts)
+    function proj(slim:any, ids:string[]){ const cam=fitCam(slim, 1, 1); const map:Record<string,{x:number;y:number}>={}; for (const id in slim.monads){ const p=(slim.monads as any)[id]; map[id]={ x:(p.x-cam.minX)*cam.sx+20, y:(p.y-cam.minY)*cam.sy+20 }; } return map; }
+    const Amap = proj(A as any, []), Bmap = proj(B as any, []);
+    const addedNodes = (s.addedNodes||[]).map((id:string)=> ({ id, x:Bmap[id]?.x||0, y:Bmap[id]?.y||0 }));
+    const removedNodes = (s.removedNodes||[]).map((id:string)=> ({ id, x:Amap[id]?.x||0, y:Amap[id]?.y||0 }));
+    function edgesToSegs(keys:string[], map:any){ const segs:any[]=[]; for (const key of keys){ const [a,b]=key.split('|'); const A=map[a], B=map[b]; if (A&&B) segs.push([A.x,A.y,B.x,B.y]); } return segs; }
+    const addedEdges = edgesToSegs(s.addedEdges, Bmap); const removedEdges = edgesToSegs(s.removedEdges, Amap);
+    onOverlayReady?.(<DiffOverlay addedNodes={addedNodes} removedNodes={removedNodes} addedEdges={addedEdges} removedEdges={removedEdges} />);
+    // pixel diff
+    try{ const ca=renderSnapshotToCanvas(A as any, 480, 320); const cb=renderSnapshotToCanvas(B as any, 480, 320); const r=pixelDiff(ca, cb); setPix({ percent: +r.percent.toFixed(2) }); }catch{ setPix(null); }
+  }, [mode, tickA, tickB, baseline?.id, index, history.length]);
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Diff</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row">
+          <label>Mode <select value={mode} onChange={e=>setMode(e.target.value as any)}><option value="ticks">Tick → Tick</option><option value="baseline">Baseline</option></select></label>
+          {mode==='ticks' ? (
+            <>
+              <label>A <input type="number" value={tickA} onChange={e=>setTickA(+e.target.value)} style={{ width:80 }} /></label>
+              <label>B <input type="number" value={tickB} onChange={e=>setTickB(+e.target.value)} style={{ width:80 }} /></label>
+            </>
+          ) : (
+            <BaselinePicker onPick={setBaseline} />
+          )}
+        </div>
+        {struct && <div className="mpl-row">
+          <div className="mpl-chip">+N {struct.addedNodes.length}</div>
+          <div className="mpl-chip">−N {struct.removedNodes.length}</div>
+          <div className="mpl-chip">+E {struct.addedEdges.length}</div>
+          <div className="mpl-chip">−E {struct.removedEdges.length}</div>
+          <div className="mpl-chip">labels Δ {struct.labelChanged.length}</div>
+          {dr && <div className="mpl-chip">drift p95 {dr.p95.toFixed(1)}px (max {dr.max.toFixed(1)})</div>}
+          {pix && <div className="mpl-chip">pixel Δ {pix.percent}%</div>}
+        </div>}
+        <div className="mpl-dim">Overlay shows adds (green) and removals (red). Pixel diff is a coarse canary; thresholds are enforced in Golden tests.</div>
+      </div>
+    </div>
+  );
+};
+
+const BaselinePicker: React.FC<{ onPick:(b:any)=>void }>=({ onPick })=>{
+  const [list,setList] = React.useState<any[]>([]);
+  React.useEffect(()=>{ import('../../engine/diff/baselines').then(m=> setList(m.loadBaselines())); }, []);
+  return (
+    <label>Baseline
+      <select onChange={e=>{ const id=e.target.value; import('../../engine/diff/baselines').then(m=>{ const b=m.loadBaselines().find((x:any)=>x.id===id); if (b) onPick(b); }); }}>
+        <option value="">(pick)</option>
+        {list.map(b=> <option key={b.id} value={b.id}>{b.name}</option>)}
+      </select>
+    </label>
+  );
+};
+
+function fitCam(s:any,w:number,h:number){ let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity; for (const id in s.monads){ const p:any=(s.monads as any)[id]; minX=Math.min(minX,p.x||0); minY=Math.min(minY,p.y||0); maxX=Math.max(maxX,p.x||0); maxY=Math.max(maxY,p.y||0); } const sx=(w-40)/Math.max(1,maxX-minX||1); const sy=(h-40)/Math.max(1,maxY-minY||1); return { minX, minY, sx, sy } }
+```
+
+---
+
+## 7) `engine/diff/golden.ts` — test cases + runner
+
+```ts
+// engine/diff/golden.ts — Stage 4S
+import type { ExecutionSnapshot } from '../debugger/graphTypes';
+import { toSlim } from '../core/perf/timelineDelta';
+import { diffStructure, drift } from './snapshot';
+import { renderSnapshotToCanvas, pixelDiff } from './image';
+
+export type GoldenThresholds = { maxAddedNodes?:number; maxRemovedNodes?:number; maxAddedEdges?:number; maxRemovedEdges?:number; maxDriftP95?:number; maxPixelDiffPct?:number };
+export type GoldenCase = { id:string; name:string; gen: ()=>ExecutionSnapshot[]; aTick:number; bTick:number; thresholds: GoldenThresholds };
+export type GoldenResult = { id:string; name:string; pass:boolean; reasons:string[]; metrics: any };
+
+export async function runCase(c: GoldenCase): Promise<GoldenResult>{
+  const hist = c.gen(); const A = toSlim(hist[Math.min(hist.length-1, Math.max(0, c.aTick))] as any), B = toSlim(hist[Math.min(hist.length-1, Math.max(0, c.bTick))] as any);
+  const s = diffStructure(A as any, B as any); const d = drift(A as any, B as any); let pix=0;
+  try{ const ca=renderSnapshotToCanvas(A as any), cb=renderSnapshotToCanvas(B as any); pix = pixelDiff(ca, cb).percent; }catch{}
+  const reasons:string[]=[]; const th=c.thresholds;
+  if (th.maxAddedNodes!=null && s.addedNodes.length>th.maxAddedNodes) reasons.push(`addedNodes ${s.addedNodes.length} > ${th.maxAddedNodes}`);
+  if (th.maxRemovedNodes!=null && s.removedNodes.length>th.maxRemovedNodes) reasons.push(`removedNodes ${s.removedNodes.length} > ${th.maxRemovedNodes}`);
+  if (th.maxAddedEdges!=null && s.addedEdges.length>th.maxAddedEdges) reasons.push(`addedEdges ${s.addedEdges.length} > ${th.maxAddedEdges}`);
+  if (th.maxRemovedEdges!=null && s.removedEdges.length>th.maxRemovedEdges) reasons.push(`removedEdges ${s.removedEdges.length} > ${th.maxRemovedEdges}`);
+  if (th.maxDriftP95!=null && d.p95>th.maxDriftP95) reasons.push(`drift p95 ${d.p95.toFixed(1)} > ${th.maxDriftP95}`);
+  if (th.maxPixelDiffPct!=null && pix>th.maxPixelDiffPct) reasons.push(`pixel ${pix.toFixed(2)}% > ${th.maxPixelDiffPct}%`);
+  return { id:c.id, name:c.name, pass: reasons.length===0, reasons, metrics: { struct:s, drift:d, pixelPct:pix } };
+}
+```
+
+---
+
+## 8) `playground/components/GoldenPanel.tsx` — define & run tests
+
+```tsx
+// playground/components/GoldenPanel.tsx
+import React from 'react';
+import { runCase, GoldenCase } from '../../engine/diff/golden';
+import { hairball, grid, pathChain } from '../../engine/fuzz/seeds';
+
+function makeCases(): GoldenCase[]{
+  return [
+    { id:'hb-lite', name:'Hairball small stable', gen: ()=> [hairball({ name:'hb', nodes:120, density:0.05, seed:'hb' }) as any], aTick:0, bTick:0, thresholds:{ maxPixelDiffPct: 0.5, maxDriftP95: 2 } },
+    { id:'grid-consistent', name:'Grid wired', gen: ()=> [grid({ name:'g', nodes:100, seed:'g' }) as any], aTick:0, bTick:0, thresholds:{ maxAddedEdges:0, maxRemovedEdges:0 } },
+    { id:'path-unchanged', name:'Path/Chain steady', gen: ()=> [pathChain({ name:'p', nodes:80, seed:'p' }) as any], aTick:0, bTick:0, thresholds:{ maxAddedNodes:0, maxRemovedNodes:0, maxPixelDiffPct: 0.3 } },
+  ];
+}
+
+export const GoldenPanel: React.FC = () => {
+  const [running, setRunning] = React.useState(false);
+  const [rows, setRows] = React.useState<any[]>([]);
+
+  async function run(){ setRunning(true); const out:any[]=[]; for (const c of makeCases()){ const r=await runCase(c); out.push(r); } setRows(out); setRunning(false); }
+  function exportReport(){ const blob=new Blob([JSON.stringify({ ts: Date.now(), results: rows }, null, 2)], { type:'application/json' }); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='golden-report.json'; a.click(); URL.revokeObjectURL(a.href); }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Golden Tests</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <div className="mpl-row"><button className="mpl-btn" onClick={run} disabled={running}>{running? 'Running…':'Run All'}</button><button className="mpl-btn" onClick={exportReport} disabled={!rows.length}>Export Report</button></div>
+        <div className="mpl-golden">
+          {rows.map(r => (
+            <div key={r.id} className={`mpl-golden-row ${r.pass?'ok':'fail'}`}>
+              <strong>{r.name}</strong>
+              <span className="mpl-chip">{r.pass? 'PASS':'FAIL'}</span>
+              {!r.pass && <span className="mpl-dim">{r.reasons.join(' • ')}</span>}
+            </div>
+          ))}
+          {!rows.length && <div className="mpl-dim">No results yet — click Run All.</div>}
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 9) `playground/components/CanvasPanel.tsx` — wire panels + overlay
+
+```tsx
+// CanvasPanel.tsx — 4S wiring (excerpt)
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { GraphCanvas } from './GraphCanvas';
+import { BaselinePanel } from './BaselinePanel';
+import { DiffPanel } from './DiffPanel';
+import { GoldenPanel } from './GoldenPanel';
+
+export const CanvasPanel: React.FC<{ history: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void }>
+= ({ history, index, onIndex }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(history[Math.max(0, Math.min(index, history.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, history]);
+  const canvasRef = React.useRef<any>(null);
+  const [overlayEl, setOverlayEl] = React.useState<JSX.Element|null>(null);
+
+  return (
+    <div className="mpl-grid" style={{ position:'relative' }}>
+      <div className="mpl-main">
+        <div style={{ position:'relative' }}>
+          <GraphCanvas ref={canvasRef} snapshot={slim} />
+          {overlayEl}
+        </div>
+      </div>
+      <aside className="mpl-side">
+        <BaselinePanel current={slim as any} onCompare={()=>{ /* switched via DiffPanel */ }} />
+        <DiffPanel history={history} index={index} onOverlayReady={setOverlayEl} />
+        <GoldenPanel />
+      </aside>
+    </div>
+  );
+};
+```
+
+---
+
+## 10) Styles — `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4S — baselines, diff, golden */
+.mpl-baseline { display:grid; grid-template-columns: 96px 1fr auto; gap:10px; align-items:center; padding:8px 0; border-bottom:1px dashed var(--mpl-border); }
+.mpl-diff { mix-blend-mode: normal; }
+.mpl-golden { display:grid; gap:8px; }
+.mpl-golden-row { display:grid; grid-template-columns: 1fr auto 1fr; gap:8px; align-items:center; padding:8px; border:1px solid var(--mpl-border); border-radius:8px; }
+.mpl-golden-row.ok { background:#ecfdf5; }
+.mpl-golden-row.fail { background:#fef2f2; }
+```
+
+---
+
+## 11) Example — `playground/pages/DebugExample4S.tsx`
+
+```tsx
+// playground/pages/DebugExample4S.tsx
+import React, { useMemo } from 'react';
+import { DebuggerPanel } from '../components/DebuggerPanel';
+import { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+
+function makeHistory(): ExecutionSnapshot[]{
+  const ids = Array.from({length:100}, (_,i)=>`N${i}`);
+  const monads = ids.map((id,i)=>({ id, neighbors: [] as string[], x: Math.cos(i*.3)*200 + (Math.random()-0.5)*6, y: Math.sin(i*.3)*200 + (Math.random()-0.5)*6 }));
+  for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++) if (Math.random()<0.03){ monads[i].neighbors.push(ids[j]); monads[j].neighbors.push(ids[i]); }
+  const A = { tick:0, monads: JSON.parse(JSON.stringify(monads)), rulesFired:['Seed'] } as any;
+  // mutate a bit
+  monads[0].neighbors.push('N5'); (monads as any).push({ id:'N100', neighbors:['N2','N3'], x:10, y:10 });
+  const B = { tick:1, monads, rulesFired:['Bridge'] } as any; return [A,B];
+}
+
+export default function DebugExample4S(){
+  const history = useMemo(makeHistory, []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4S — Snapshot Diffing + Baselines + Golden Tests</h1>
+      <DebuggerPanel history={history} />
+      <p className="mpl-dim">Save a baseline, compare ticks or baseline, and run the golden tests to see pass/fail reasons.</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 12) Notes
+
+* **Projection**: The overlay uses a quick fit‑to‑canvas projection for A/B — consistent with the offscreen renderer. For precise overlays, project through the live camera from `GraphCanvas`.
+* **Pixel diff**: Designed as a coarse signal; lighting/themes/labels affect it. Keep thresholds loose (1–3%) unless rendering is stable.
+* **Baselines**: Store a PNG thumbnail for faster scanning; the raw snapshot is used for metrics.
+* **Golden cases**: The sample uses static generators; swap in your own seeds or prebuilt timelines.
+* **CI idea**: Expose `GoldenPanel.run()` as a headless function to run in CI (Puppeteer/Playwright) and gate merges.
+
+---
+
+## 13) Changelog — Stage 4S
+
+* New: `engine/diff/snapshot.ts` (index + struct + drift)
+* New: `engine/diff/image.ts` (offscreen render + pixel diff)
+* New: `engine/diff/baselines.ts` (storage)
+* New: `engine/diff/golden.ts` (threshold runner)
+* New UI: `BaselinePanel.tsx`, `DiffPanel.tsx`, `DiffOverlay.tsx`, `GoldenPanel.tsx`
+* Updated: `CanvasPanel.tsx` (wire diff/baselines/tests)
+* Styles: baselines list, diff overlay, golden rows
+
+```
+```

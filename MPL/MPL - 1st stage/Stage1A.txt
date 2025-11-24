@@ -1,0 +1,488 @@
+# MPL — Stage 1A (Full Code Snapshot)
+
+This canvas contains a complete, runnable snapshot of **Stage 1A**.
+- Monorepo scaffold (`mpl-core`, `mpl-web`)
+- Monaco editor with basic `.mpl` highlighting
+- 2D Canvas grid renderer
+- Minimal VM + linter + `compile()` stub
+- Run button executes simple commands: `set(x,y); toggle(x,y); clear(); step();`
+
+---
+
+## Root (workspace)
+
+### package.json
+```json
+{
+  "name": "mpl-playground",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["mpl-core", "mpl-web"],
+  "scripts": {
+    "build": "npm -w mpl-core run build && npm -w mpl-web run build",
+    "dev": "npm -w mpl-web run dev",
+    "lint": "npm -w mpl-web run lint"
+  }
+}
+```
+
+### tsconfig.base.json
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
+    "baseUrl": "."
+  }
+}
+```
+
+### README.md
+```md
+# MPL Playground – Stage 1A
+
+**Goal**: Clickable web IDE with Monaco, basic `.mpl` highlighting + linting, a 2D grid renderer, and a Run button that executes simple commands.
+
+## Quick start
+```bash
+npm install
+npm run dev
+# open http://localhost:5173
+```
+```
+
+---
+
+## mpl-core
+
+### package.json
+```json
+{
+  "name": "mpl-core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.4"
+  }
+}
+```
+
+### tsconfig.json
+```json
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "declaration": true,
+    "emitDeclarationOnly": false
+  },
+  "include": ["src"]
+}
+```
+
+### src/types.ts
+```ts
+export type Cell = 0 | 1;
+
+export interface Grid {
+  width: number;
+  height: number;
+  data: Uint8Array; // length = width * height
+}
+
+export interface Program {
+  source: string;
+  ast: unknown; // placeholder for later stages
+}
+
+export interface Diagnostic {
+  message: string;
+  line: number; // 1-based
+  column: number; // 1-based
+  severity: "error" | "warning";
+}
+
+export interface CompileResult {
+  program: Program;
+  errors: Diagnostic[];
+}
+
+export interface VMState { grid: Grid; }
+```
+
+### src/parser.ts
+```ts
+import type { Program } from "./types";
+
+// Minimal placeholder parser: returns token list as fake AST
+export function parse(source: string): Program {
+  const tokens = source
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return { source, ast: tokens };
+}
+```
+
+### src/linter.ts
+```ts
+import type { Diagnostic } from "./types";
+
+const RESERVED = new Set(["grid","width","height","set","clear","toggle","step","rule"]);
+
+export function lint(source: string): Diagnostic[] {
+  const diags: Diagnostic[] = [];
+  const lines = source.split(/\r?\n/);
+  lines.forEach((line, idx) => {
+    const lno = idx + 1;
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    if (/\t/.test(line)) {
+      diags.push({ message: "Tab character found. Use spaces.", line: lno, column: line.indexOf("\t") + 1, severity: "warning" });
+    }
+
+    const bad = line.match(/[^\s\w_().,=:+\-/*<>\[\];]/g);
+    if (bad) {
+      diags.push({ message: `Unexpected character(s): ${[...new Set(bad)].join(" ")}`, line: lno, column: 1, severity: "error" });
+    }
+
+    // Semicolon suggestion (style only)
+    if (!/[{]$/.test(trimmed) && /[A-Za-z0-9)\]]/.test(trimmed) && !/;\s*$/.test(trimmed)) {
+      diags.push({ message: "Missing semicolon.", line: lno, column: line.length, severity: "warning" });
+    }
+
+    // Naive ALL-CAPS token warning unless reserved
+    const words = line.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
+    for (const w of words) {
+      if (w === w.toUpperCase() && !RESERVED.has(w.toLowerCase())) {
+        diags.push({ message: `Unknown token '${w}'.`, line: lno, column: line.indexOf(w) + 1, severity: "warning" });
+      }
+    }
+  });
+  return diags;
+}
+```
+
+### src/vm.ts
+```ts
+import type { Grid, VMState } from "./types";
+
+export function makeGrid(width: number, height: number): Grid {
+  return { width, height, data: new Uint8Array(width * height) };
+}
+
+export function cloneGrid(g: Grid): Grid {
+  return { width: g.width, height: g.height, data: new Uint8Array(g.data) };
+}
+
+export function getCell(g: Grid, x: number, y: number): number {
+  if (x < 0 || y < 0 || x >= g.width || y >= g.height) return 0;
+  return g.data[y * g.width + x];
+}
+
+export function setCell(g: Grid, x: number, y: number, v: 0 | 1) { if (x>=0 && y>=0 && x<g.width && y<g.height) g.data[y * g.width + x] = v; }
+export function toggleCell(g: Grid, x: number, y: number) { if (x>=0 && y>=0 && x<g.width && y<g.height) { const i = y * g.width + x; g.data[i] = g.data[i] ? 0 : 1; } }
+
+// Placeholder: Conway B3/S23
+export function step(g: Grid): Grid {
+  const out = cloneGrid(g);
+  for (let y = 0; y < g.height; y++) {
+    for (let x = 0; x < g.width; x++) {
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy) n += getCell(g, x + dx, y + dy);
+      const alive = getCell(g, x, y) === 1;
+      const i = y * g.width + x;
+      out.data[i] = alive ? (n === 2 || n === 3 ? 1 : 0) : (n === 3 ? 1 : 0);
+    }
+  }
+  return out;
+}
+
+export function initVM(width = 48, height = 32): VMState { return { grid: makeGrid(width, height) }; }
+```
+
+### src/index.ts
+```ts
+export * from "./types";
+export { parse } from "./parser";
+export { lint } from "./linter";
+export { makeGrid, cloneGrid, getCell, setCell, toggleCell, step, initVM } from "./vm";
+
+import { parse } from "./parser";
+import { lint as runLint } from "./linter";
+import type { CompileResult } from "./types";
+
+export function compile(source: string): CompileResult {
+  const errors = runLint(source).filter((d) => d.severity === "error");
+  return { program: parse(source), errors };
+}
+```
+
+---
+
+## mpl-web
+
+### package.json
+```json
+{
+  "name": "mpl-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "lint": "echo 'Lint via Monaco in-IDE for .mpl; add ESLint here if desired'"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.6.0",
+    "monaco-editor": "^0.49.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "mpl-core": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1"
+  }
+}
+```
+
+### tsconfig.json
+```json
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["vite/client"], "baseUrl": "." },
+  "include": ["src", "vite.config.ts", "index.html"]
+}
+```
+
+### vite.config.ts
+```ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+export default defineConfig({ plugins: [react()], server: { port: 5173 } });
+```
+
+### index.html
+```html
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MPL Playground</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+### src/main.tsx
+```ts
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
+```
+
+### src/App.tsx
+```tsx
+import { useEffect } from "react";
+import MonacoMPL from "./editor/MonacoMPL";
+import GridCanvas from "./canvas/GridCanvas";
+import { useMPL } from "./state/useMPL";
+
+export default function App() {
+  const { source, setSource, diagnostics, run, state, stepOnce, clearGrid } = useMPL();
+
+  useEffect(() => {
+    if (!source.trim()) setSource("set(1,2); set(2,3); set(3,1); set(3,2); set(3,3);\nstep();");
+  }, []);
+
+  return (
+    <div className="app">
+      <header className="bar">
+        <h1>MPL Playground (Stage 1A)</h1>
+        <div className="actions">
+          <button onClick={run}>Run</button>
+          <button onClick={stepOnce}>Step</button>
+          <button onClick={clearGrid}>Clear Grid</button>
+        </div>
+      </header>
+      <main className="content">
+        <section className="editor"><MonacoMPL value={source} onChange={setSource} diagnostics={diagnostics} /></section>
+        <section className="canvas"><GridCanvas grid={state.grid} cellSize={16} /></section>
+      </main>
+    </div>
+  );
+}
+```
+
+### src/editor/MonacoMPL.tsx
+```tsx
+import Editor, { OnChange, useMonaco } from "@monaco-editor/react";
+import { useEffect } from "react";
+
+export interface MonacoDiag { message: string; line: number; column: number; severity: "error" | "warning"; }
+
+export default function MonacoMPL({ value, onChange, diagnostics }: { value: string; onChange: (v: string) => void; diagnostics: MonacoDiag[]; }) {
+  const monaco = useMonaco();
+
+  useEffect(() => {
+    if (!monaco) return;
+    const id = "mpl";
+    monaco.languages.register({ id });
+    monaco.languages.setMonarchTokensProvider(id, {
+      tokenizer: {
+        root: [
+          [/\/\/.*$/, "comment"],
+          [/\b(grid|width|height|set|clear|toggle|step|rule)\b/, "keyword"],
+          [/\b\d+\b/, "number"],
+          [/"[^"]*"/, "string"],
+          [[/[{}()[\]]/, "delimiter"]],
+          [/[,.;]/, "delimiter"],
+          [/\b[A-Za-z_][A-Za-z0-9_]*\b/, "identifier"],
+        ],
+      },
+    });
+  }, [monaco]);
+
+  useEffect(() => {
+    if (!monaco) return;
+    const model = monaco.editor.getModels()[0];
+    if (!model) return;
+    monaco.editor.setModelMarkers(
+      model,
+      "mpl-linter",
+      diagnostics.map((d) => ({
+        message: d.message,
+        startLineNumber: d.line,
+        startColumn: d.column,
+        endLineNumber: d.line,
+        endColumn: d.column + 1,
+        severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+      }))
+    );
+  }, [monaco, diagnostics]);
+
+  const handleChange: OnChange = (v) => onChange(v || "");
+
+  return <Editor height="100%" defaultLanguage="mpl" value={value} onChange={handleChange} options={{ minimap: { enabled: false }, fontSize: 14, tabSize: 2, insertSpaces: true, wordWrap: "on" }} />;
+}
+```
+
+### src/canvas/GridCanvas.tsx
+```tsx
+import { useEffect, useRef } from "react";
+import type { Grid } from "mpl-core";
+
+export default function GridCanvas({ grid, cellSize = 12 }: { grid: Grid; cellSize?: number }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = ref.current!;
+    canvas.width = grid.width * cellSize;
+    canvas.height = grid.height * cellSize;
+    const ctx = canvas.getContext("2d")!;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // draw live cells
+    for (let y = 0; y < grid.height; y++) {
+      for (let x = 0; x < grid.width; x++) {
+        if (grid.data[y * grid.width + x]) ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+      }
+    }
+
+    // grid lines
+    ctx.globalAlpha = 0.15;
+    for (let x = 0; x <= grid.width; x++) { ctx.beginPath(); ctx.moveTo(x * cellSize + 0.5, 0); ctx.lineTo(x * cellSize + 0.5, grid.height * cellSize); ctx.stroke(); }
+    for (let y = 0; y <= grid.height; y++) { ctx.beginPath(); ctx.moveTo(0, y * cellSize + 0.5); ctx.lineTo(grid.width * cellSize, y * cellSize + 0.5); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  }, [grid, cellSize]);
+
+  return <canvas ref={ref} style={{ width: "100%", height: "100%", border: "1px solid #ddd" }} />;
+}
+```
+
+### src/state/useMPL.ts
+```ts
+import { useCallback, useMemo, useState } from "react";
+import { compile, initVM, setCell, step, toggleCell, type VMState } from "mpl-core";
+import { lint } from "mpl-core";
+
+export function useMPL() {
+  const [source, setSource] = useState("");
+  const [state, setState] = useState<VMState>(() => initVM(48, 32));
+  const diagnostics = useMemo(() => lint(source), [source]);
+
+  const run = useCallback(() => {
+    const res = compile(source);
+    if (res.errors.length) return;
+
+    const lines = source.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    let g = state.grid;
+    for (const line of lines) {
+      if (line.startsWith("set")) {
+        const m = line.match(/set\((\d+)\s*,\s*(\d+)\)/);
+        if (m) setCell(g, Number(m[1]), Number(m[2]), 1);
+      } else if (line.startsWith("toggle")) {
+        const m = line.match(/toggle\((\d+)\s*,\s*(\d+)\)/);
+        if (m) toggleCell(g, Number(m[1]), Number(m[2]));
+      } else if (line.startsWith("clear")) {
+        g.data.fill(0);
+      } else if (line.startsWith("step")) {
+        g = step(g);
+      }
+    }
+    setState({ grid: g });
+  }, [source, state.grid]);
+
+  const stepOnce = useCallback(() => setState((s) => ({ grid: step(s.grid) })), []);
+  const clearGrid = useCallback(() => setState((s) => ({ grid: { ...s.grid, data: new Uint8Array(s.grid.width * s.grid.height) } })), []);
+
+  return { source, setSource, diagnostics, run, state, stepOnce, clearGrid };
+}
+```
+
+### src/styles.css
+```css
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; }
+.app { display: grid; grid-template-rows: 56px 1fr; height: 100%; }
+.bar { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #eee; }
+.bar h1 { margin: 0; font-size: 16px; font-weight: 600; }
+.actions { display: flex; gap: 8px; }
+.actions button { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; }
+.content { display: grid; grid-template-columns: 1fr 1fr; height: 100%; }
+.editor { border-right: 1px solid #eee; }
+.canvas { display: flex; align-items: stretch; justify-content: stretch; padding: 8px; }
+```
+
+---
+
+**Done.** This is a complete Stage 1A snapshot you can run as-is.
+
+Next step: want me to publish **Stage 1B (full code)** as the next canvas now?

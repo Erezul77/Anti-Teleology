@@ -1,0 +1,368 @@
+# MPL Playground — Stage 4J Patch (Rule Heatmap + Per‑Rule Edge Tinting + Click‑to‑Filter)
+
+This patch adds **rule awareness** across the UI:
+
+* A compact **Rule Heatmap** over the timeline (counts per rule per tick)
+* **Per‑rule edge tinting** and node halos on the canvas
+* **Click‑to‑filter by rule** (with a sliding window in ticks, fade/isolated modes)
+
+Zero new deps. Builds on 4C–4I (canvas, worker, LOD, inspector, mini‑map, capture, diff).
+
+---
+
+## Highlights
+
+* Robust rule parsing: supports `rulesFired: string[]` **or** `rulesFired: { id: string; nodes?: string[]; edges?: [string,string][] }[]`
+* Rule palette: stable HSL by rule name
+* Overlay modes:
+
+  * **Fade others**: non‑matching edges/nodes dim
+  * **Isolate**: draw **only** matching edges; massively reduces clutter on dense graphs
+* Sliding window: last **N ticks** (configurable) accumulate touched nodes/edges for the selected rule
+
+---
+
+## 1) `engine/debugger/rulesIndex.ts` (new) — parse & index rules
+
+```ts
+// engine/debugger/rulesIndex.ts
+import type { ExecutionSnapshot } from "./graphTypes";
+
+export type RuleHit = { rule: string; nodes: Set<string>; edges: Set<string> };
+export type RuleIndex = { byTick: RuleHit[]; rules: string[]; counts: Record<string, number[]> };
+
+export function buildRuleIndex(history: ExecutionSnapshot[]): RuleIndex {
+  const rulesSet = new Set<string>();
+  const byTick: RuleHit[] = [];
+
+  for (let t=0; t<history.length; t++){
+    const snap = history[t] || { rulesFired: [] } as any;
+    const hit: RuleHit = { rule: "__AGG__", nodes: new Set(), edges: new Set() };
+    // per rule per tick temp
+    const per: Record<string, { nodes: Set<string>; edges: Set<string> }> = {};
+    const list = (snap.rulesFired || []) as any[];
+    for (const item of list){
+      const id = (typeof item === 'string') ? item : (item?.id ?? String(item));
+      rulesSet.add(id);
+      const rec = per[id] || (per[id] = { nodes: new Set(), edges: new Set() });
+      const nodes: string[] = (typeof item === 'string') ? [] : (item.nodes || []);
+      const edges: [string,string][] = (typeof item === 'string') ? [] : (item.edges || []);
+      for (const n of nodes) rec.nodes.add(n);
+      for (const [a,b] of edges){ rec.edges.add(edgeKey(a,b)); }
+    }
+    // Merge into a synthetic hit that stores all rule edges/nodes this tick (not used directly)
+    for (const k in per){ for (const n of per[k].nodes) hit.nodes.add(n); for (const e of per[k].edges) hit.edges.add(e); }
+    byTick[t] = hit;
+  }
+
+  // counts table (rules × ticks)
+  const rules = Array.from(rulesSet).sort();
+  const counts: Record<string, number[]> = {};
+  for (const r of rules){ counts[r] = new Array(history.length).fill(0); }
+  for (let t=0; t<history.length; t++){
+    const list = (history[t]?.rulesFired || []) as any[];
+    const tally: Record<string, number> = {};
+    for (const item of list){ const id = (typeof item === 'string') ? item : (item?.id ?? String(item)); tally[id] = (tally[id]||0) + 1; }
+    for (const r in tally) counts[r][t] = tally[r];
+  }
+
+  return { byTick, rules, counts };
+}
+
+export function collectWindow(history: ExecutionSnapshot[], ruleId: string, centerTick: number, lastN = 5){
+  const nodes = new Set<string>(); const edges = new Set<string>();
+  const start = Math.max(0, centerTick - Math.max(0, lastN-1)); const end = Math.min(history.length-1, centerTick);
+  for (let t=start; t<=end; t++){
+    const list = (history[t]?.rulesFired || []) as any[];
+    for (const item of list){ const id = (typeof item === 'string') ? item : (item?.id ?? String(item)); if (id !== ruleId) continue;
+      const nodesArr: string[] = (typeof item === 'string') ? [] : (item.nodes || []);
+      const edgesArr: [string,string][] = (typeof item === 'string') ? [] : (item.edges || []);
+      for (const n of nodesArr) nodes.add(n); for (const [a,b] of edgesArr) edges.add(edgeKey(a,b));
+      // Fallback: if no explicit edges were provided, infer edges between touched nodes in that tick
+      if (!edgesArr.length && nodesArr.length>=2){ for (let i=0;i<nodesArr.length;i++) for (let j=i+1;j<nodesArr.length;j++) edges.add(edgeKey(nodesArr[i], nodesArr[j])); }
+    }
+  }
+  return { nodes, edges };
+}
+
+export function edgeKey(a: string, b: string){ return a < b ? `${a}|${b}` : `${b}|${a}`; }
+
+export function colorForRule(ruleId: string){
+  // Stable HSL by hash
+  let h = 2166136261>>>0; for (let i=0;i<ruleId.length;i++){ h ^= ruleId.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const hue = h % 360; return `hsl(${hue} 70% 50%)`;
+}
+```
+
+---
+
+## 2) `engine/renderer/canvas/CanvasGraph.ts` (update) — rule overlay
+
+```ts
+// CanvasGraph.ts — 4J: rule overlay tinting
+import { edgeKey } from '../../debugger/rulesIndex';
+
+export type RuleOverlay = {
+  rule: string; color: string; nodes: Set<string>; edges: Set<string>;
+  fadeOthers: boolean; isolate: boolean;
+};
+
+export class CanvasGraph {
+  // ...existing fields
+  private ruleOverlay: RuleOverlay | null = null;
+  setRuleOverlay(o: RuleOverlay | null){ this.ruleOverlay = o; }
+
+  draw(){
+    const s = this.last; if (!s) return; const ctx = this.ctx; const { width, height } = this.canvas; ctx.save();
+    ctx.fillStyle = this.theme.bg; ctx.fillRect(0,0,width,height); drawGrid(ctx, this.cam, width, height, this.theme.grid);
+    const P = this.externalPos; const stride = Math.max(1, this.lod.sampleStride|0);
+    const RO = this.ruleOverlay;
+
+    // Edges
+    ctx.lineWidth = 1; let drawn = 0; let cursor = this.frameEdgeCursor;
+    outer: for (const id in s.monads){ const m = s.monads[id]; const a = P?.[id] || m; const nb = m.neighbors||[];
+      for (let ei=0; ei<nb.length; ei++){
+        const t = nb[ei]; if (id>=t) continue; if ((cursor++%stride)!==0) continue;
+        const b = P?.[t] || (s.monads as any)[t]; if (!b) continue; const A2=worldToScreen(a as any, this.cam), B2=worldToScreen(b as any, this.cam);
+        const k = edgeKey(id,t); let col = this.theme.edge; let alpha = ((a as any).alpha*(b as any).alpha);
+        let draw = true;
+        if (RO){ const hit = RO.edges.has(k) || RO.nodes.has(id) || RO.nodes.has(t); if (RO.isolate) draw = hit; if (hit){ col = RO.color; alpha = 0.95; } else if (RO.fadeOthers) { alpha *= 0.15; } }
+        if (!draw) continue;
+        ctx.strokeStyle = col; ctx.globalAlpha = alpha; ctx.beginPath(); routeEdge(ctx, A2.x, A2.y, B2.x, B2.y, this.edgeMode, this.curvature, id<t?1:-1); ctx.stroke(); ctx.globalAlpha = 1;
+        if (++drawn >= this.lod.edgeBudget) break outer;
+      }
+    }
+    this.frameEdgeCursor = cursor;
+
+    // Nodes with rule halos
+    for (const id in s.monads){ const p = P?.[id] || s.monads[id]; const scr=worldToScreen(p as any, this.cam); const r = this.getNodeRadius(id);
+      if (RO && RO.nodes.has(id)){ ctx.save(); ctx.shadowColor=RO.color; ctx.shadowBlur=18; ctx.beginPath(); ctx.arc(scr.x,scr.y,r+2,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0)'; ctx.fill(); ctx.restore(); }
+      ctx.beginPath(); ctx.arc(scr.x, scr.y, r, 0, Math.PI*2); let fill = this.sel===id ? this.theme.nodeSel : this.theme.node; if (RO && RO.fadeOthers && !RO.nodes.has(id)) ctx.globalAlpha=0.7; ctx.fillStyle = fill; ctx.fill(); ctx.globalAlpha=1;
+    }
+
+    // labels (unchanged) ...
+    ctx.restore();
+  }
+}
+```
+
+---
+
+## 3) `playground/components/RuleHeatmap.tsx` (new) — the heatmap strip
+
+```tsx
+// playground/components/RuleHeatmap.tsx
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { buildRuleIndex, colorForRule } from '../../engine/debugger/rulesIndex';
+
+export const RuleHeatmap: React.FC<{
+  history: ExecutionSnapshot[];
+  onPick: (ruleId: string|null) => void;
+  picked: string | null;
+}>
+= ({ history, onPick, picked }) => {
+  const idx = React.useMemo(()=>buildRuleIndex(history), [history]);
+  const [q, setQ] = React.useState('');
+  const rules = React.useMemo(()=>idx.rules.filter(r => r.toLowerCase().includes(q.toLowerCase())), [q, idx.rules]);
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Rule Heatmap</div>
+      <div className="mpl-card-b">
+        <input placeholder="filter…" value={q} onChange={e=>setQ(e.target.value)} style={{ width: '100%', padding: 6, border:'1px solid #e5e7eb', borderRadius: 8 }} />
+        <div style={{ maxHeight: 220, overflow: 'auto', display: 'grid', gap: 8 }}>
+          {rules.map(rule => <Row key={rule} rule={rule} counts={idx.counts[rule]} picked={picked} onPick={onPick} />)}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const Row: React.FC<{ rule: string; counts: number[]; picked: string|null; onPick: (r:string)=>void }>
+= ({ rule, counts, picked, onPick }) => {
+  const total = counts.reduce((a,b)=>a+b,0);
+  const col = colorForRule(rule);
+  return (
+    <div className="mpl-rule-row" onClick={()=>onPick(rule)} style={{ cursor:'pointer', border: picked===rule? '1px solid #6366f1' : '1px solid #eef2f7', borderRadius:8, padding:6 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <span className="mpl-chip" style={{ background: col, color: '#fff' }}>{total}</span>
+        <code style={{ fontSize: 12, opacity:0.9 }}>{rule}</code>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns: `repeat(${counts.length}, 6px)`, gap:2, marginTop:6 }}>
+        {counts.map((c,i)=> <div key={i} title={`t${i}: ${c}`} style={{ width:6, height:12, background: c? col : '#e5e7eb', opacity: c? Math.min(1, 0.35 + c/6) : 1 }} />)}
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 4) `engine/debugger/rulesOverlay.ts` (new) — compute overlay for a window
+
+```ts
+// engine/debugger/rulesOverlay.ts
+import type { ExecutionSnapshot } from './graphTypes';
+import { collectWindow, colorForRule } from './rulesIndex';
+
+export function makeRuleOverlay(history: ExecutionSnapshot[], ruleId: string, centerTick: number, lastN: number, mode: 'fade'|'isolate'){
+  const { nodes, edges } = collectWindow(history, ruleId, centerTick, lastN);
+  const color = colorForRule(ruleId);
+  const fadeOthers = mode === 'fade'; const isolate = mode === 'isolate';
+  return { rule: ruleId, color, nodes, edges, fadeOthers, isolate };
+}
+```
+
+---
+
+## 5) `playground/components/RulePanel.tsx` (new) — controls for the overlay
+
+```tsx
+// playground/components/RulePanel.tsx
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { RuleHeatmap } from './RuleHeatmap';
+import { makeRuleOverlay } from '../../engine/debugger/rulesOverlay';
+
+export const RulePanel: React.FC<{
+  history: ExecutionSnapshot[];
+  tick: number;
+  onOverlay: (overlay: any|null) => void;
+}>
+= ({ history, tick, onOverlay }) => {
+  const [rule, setRule] = React.useState<string|null>(null);
+  const [lastN, setLastN] = React.useState(6);
+  const [mode, setMode] = React.useState<'fade'|'isolate'>('fade');
+
+  React.useEffect(() => { if (!rule) { onOverlay(null); return; } onOverlay(makeRuleOverlay(history, rule, tick, lastN, mode)); }, [rule, tick, lastN, mode, history.length]);
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Rule Filter</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap: 8 }}>
+        <RuleHeatmap history={history} picked={rule} onPick={(r)=> setRule(prev => prev===r ? null : r)} />
+        <div className="mpl-row">
+          <label>Window (last N ticks) <input type="number" min={1} value={lastN} onChange={e=>setLastN(Math.max(1, parseInt(e.target.value)||1))} style={{ width: 80 }} /></label>
+          <label>Mode
+            <select value={mode} onChange={e=>setMode(e.target.value as any)}>
+              <option value="fade">Fade others</option>
+              <option value="isolate">Isolate</option>
+            </select>
+          </label>
+          <button className="mpl-btn" onClick={()=>setRule(null)} disabled={!rule}>Clear</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+## 6) `playground/components/CanvasPanel.tsx` (update) — wire the overlay into the canvas
+
+```tsx
+// CanvasPanel.tsx — 4J wiring (excerpt)
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { GraphCanvas } from './GraphCanvas';
+import { RulePanel } from './RulePanel';
+
+export const CanvasPanel: React.FC<{ timeline: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void }>
+= ({ timeline, index, onIndex }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(timeline[Math.max(0, Math.min(index, timeline.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, timeline]);
+  const [overlay, setOverlay] = React.useState<any|null>(null);
+  const canvasRef = React.useRef<any>(null);
+
+  // Push overlay into GraphCanvas
+  React.useEffect(() => { const g = (canvasRef.current as any)?._graph; if (!g) return; g.setRuleOverlay(overlay); g.draw(); }, [overlay, slim.tick]);
+
+  return (
+    <div className="mpl-grid">
+      <div className="mpl-main">
+        {/* existing playback + scrubber + canvas UI from prior stages */}
+        <GraphCanvas ref={canvasRef} snapshot={slim} />
+      </div>
+      <aside className="mpl-side">
+        <RulePanel history={timeline} tick={index} onOverlay={setOverlay} />
+      </aside>
+    </div>
+  );
+};
+```
+
+> Ensure your `GraphCanvas` exposes its internal `CanvasGraph` via `useImperativeHandle` and stashes it at `ref.current._graph` (not shown here; see 4I note).
+
+---
+
+## 7) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4J — rule heatmap + panel polish */
+.mpl-rule-row { display: grid; grid-template-columns: 1fr; gap: 6px; background: #fff; }
+.mpl-card .mpl-chip { color: #111827; font-weight: 600; }
+```
+
+---
+
+## 8) Example — `playground/pages/DebugExample4J.tsx`
+
+```tsx
+// playground/pages/DebugExample4J.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+function historyWithRules(): ExecutionSnapshot[] {
+  const ticks: ExecutionSnapshot[] = [];
+  const ids = ['A','B','C','D','E','F'];
+  const base = (xy: Record<string,[number,number]>) => ids.map(id => ({ id, neighbors: [], x: xy[id][0], y: xy[id][1] }));
+  const connect = (m:any, a:string,b:string)=>{ const A=m.find((x:any)=>x.id===a); const B=m.find((x:any)=>x.id===b); A.neighbors.push(b); B.neighbors.push(a); };
+  // t0
+  let m0 = base({ A:[-160,-40], B:[-40,-80], C:[-40,80], D:[40,-60], E:[40,60], F:[160,20] });
+  connect(m0,'A','B'); connect(m0,'B','C'); connect(m0,'C','E'); connect(m0,'D','E');
+  ticks.push({ tick:0, monads:m0, rulesFired:[ { id:'SeedPairs', nodes:['A','B','C'] } ] } as any);
+  // t1
+  let m1 = base({ A:[-150,-30], B:[-30,-60], C:[-20,60], D:[50,-60], E:[60,60], F:[160,30] });
+  connect(m1,'A','B'); connect(m1,'B','C'); connect(m1,'C','E'); connect(m1,'D','E'); connect(m1,'E','F');
+  ticks.push({ tick:1, monads:m1, rulesFired:[ 'PromotePath', { id:'AttachTail', nodes:['E','F'], edges:[['E','F']] } ] } as any);
+  // t2
+  let m2 = base({ A:[-120,-10], B:[-10,-50], C:[0,50], D:[70,-50], E:[80,50], F:[180,40] });
+  connect(m2,'A','B'); connect(m2,'B','C'); connect(m2,'C','E'); connect(m2,'D','E'); connect(m2,'E','F'); connect(m2,'B','D');
+  ticks.push({ tick:2, monads:m2, rulesFired:[ { id:'PromotePath' }, { id:'Bridge', nodes:['B','D'], edges:[['B','D']] } ] } as any);
+  return ticks;
+}
+
+export default function DebugExample4J(){
+  const history = useMemo(historyWithRules, []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4J — Rule Heatmap + Per‑Rule Edge Tinting + Click‑to‑Filter</h1>
+      <DebuggerPanel history={history} />
+      <p className="mpl-dim">Click a rule in the heatmap to tint matching edges (last N ticks). Toggle **Isolate** to show only that rule's edges.</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 9) Notes
+
+* If your real snapshots attach **per‑edge provenance** (e.g., `edges: [ [a,b], ... ]`), tinting will be exact. Otherwise, the overlay infers edges between nodes listed for the rule in that tick.
+* For large timelines, you can virtualize the heatmap list or group rules by prefix.
+* LOD still applies; consider raising edge budget when isolating a rule to guarantee visibility.
+
+---
+
+## 10) Changelog — Stage 4J
+
+* New: `rulesIndex.ts` (rule parsing/index), `rulesOverlay.ts` (overlay assembly), `RuleHeatmap.tsx`, `RulePanel.tsx`
+* Updated: `CanvasGraph.ts` (rule overlay tinting)
+* Updated: `CanvasPanel.tsx` (wire overlay)
+* Styles: minor tweaks
+
+```
+```

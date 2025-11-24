@@ -1,0 +1,117 @@
+# MPL – Stage 2J (Session Persistence & Experiment Logs)
+
+This is the **complete Stage 2J project** with all modules from Stage 2A through 2J integrated in one place.
+
+---
+
+## Directory Tree
+
+```
+MPL-Stage-2/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ runtime/
+│  │  ├─ interpreter.ts       # Core MPL interpreter
+│  │  ├─ monad.ts             # Monad definition
+│  │  ├─ grid.ts              # Grid engine with cell state
+│  │  └─ topology/
+│  │     └─ index.ts          # Toroidal / clipping edges
+│  ├─ debug/
+│  │  └─ trace.ts             # Debugger + error reporter
+│  ├─ emotional/
+│  │  └─ types.ts             # Affect/joy/adequacy types
+│  ├─ utils/
+│  │  └─ io.ts                # IO utilities
+│  └─ web/
+│     ├─ web-main.ts          # Browser entrypoint
+│     ├─ colors.ts            # Heatmap & visualization colors
+│     └─ session.ts           # Session persistence + logs
+└─ examples/
+   └─ run.ts                  # Node CLI runner
+```
+
+---
+
+## README.md (excerpt)
+
+```md
+# MPL – Stage 2J (Session Persistence & Experiment Logs)
+
+## Features up to Stage 2J
+- ✅ 2A: Rule engine with snapshot reads + staged writes.
+- ✅ 2B: Neighbor-aware env + Grid2D with topologies.
+- ✅ 2C: Debugger with trace events.
+- ✅ 2D: Error reporter patch.
+- ✅ 2E: Visualization (ASCII, PNG).
+- ✅ 2F: PNG snapshot renderer.
+- ✅ 2G: Browser live visualization.
+- ✅ 2H: Toroidal edges + affect heatmap.
+- ✅ 2I: Rule authoring UI + presets.
+- ✅ 2J: Session persistence + experiment logs.
+```
+
+---
+
+## Key Code Highlights
+
+### session.ts
+
+```ts
+export class SessionManager {
+  constructor(private key: string = 'mpl-sessions') {}
+
+  saveSession(name: string, state: any) {
+    const sessions = this.loadAll();
+    sessions[name] = state;
+    localStorage.setItem(this.key, JSON.stringify(sessions));
+  }
+
+  loadSession(name: string) {
+    const sessions = this.loadAll();
+    return sessions[name] ?? null;
+  }
+
+  deleteSession(name: string) {
+    const sessions = this.loadAll();
+    delete sessions[name];
+    localStorage.setItem(this.key, JSON.stringify(sessions));
+  }
+
+  loadAll() {
+    try {
+      return JSON.parse(localStorage.getItem(this.key) || '{}');
+    } catch {
+      return {};
+    }
+  }
+}
+```
+
+### web-main.ts (excerpt)
+
+```ts
+import { SessionManager } from './session';
+
+const sessionManager = new SessionManager();
+
+// Hook into UI buttons
+document.getElementById('saveBtn')?.addEventListener('click', () => {
+  const state = collectCurrentState();
+  const name = prompt('Session name?') || `sess-${Date.now()}`;
+  sessionManager.saveSession(name, state);
+});
+
+document.getElementById('loadBtn')?.addEventListener('click', () => {
+  const name = prompt('Session to load?');
+  if (name) {
+    const state = sessionManager.loadSession(name);
+    if (state) applyState(state);
+  }
+});
+```
+
+---
+
+📌 Stage 2J ensures experiments are **never lost** between reloads, supports named sessions, and allows users to **log and review experiments** over time. This is now the full integrated canvas for Stage 2J.

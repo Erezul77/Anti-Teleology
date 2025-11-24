@@ -1,0 +1,359 @@
+# MPL – Stage 2O (Automated Pattern Detection & Tagging)
+
+Stage 2O builds on 2N and adds **automated pattern detection** for runs, with **live tagging** of:
+
+* **Still lifes** (period 1, no translation)
+* **Oscillators** (period >1, no translation)
+* **Spaceships** (periodic with non‑zero translation per cycle)
+* **Die‑outs** (population reaches zero)
+
+This stage introduces a compact pattern detector that hashes shapes in a translation‑aware way and looks back over a configurable window to infer **period** and **velocity**. Tags are shown in a side panel and can be exported.
+
+---
+
+## Directory Tree (updated)
+
+```
+MPL-Stage-2/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ runtime/
+│  │  ├─ interpreter.ts
+│  │  ├─ monad.ts
+│  │  ├─ grid.ts
+│  │  └─ topology/
+│  │     └─ index.ts
+│  ├─ debug/
+│  │  └─ trace.ts
+│  ├─ emotional/
+│  │  └─ types.ts
+│  ├─ utils/
+│  │  └─ io.ts
+│  └─ web/
+│     ├─ web-main.ts
+│     ├─ colors.ts
+│     ├─ session.ts
+│     ├─ sweep.ts
+│     ├─ dashboard.ts
+│     ├─ patterns.ts        # NEW: detector core
+│     └─ detect-main.ts     # NEW: single-grid UI with live tagging
+└─ index-2o.html             # NEW: 2O UI entry
+```
+
+Add this script to **package.json**:
+
+```json
+{
+  "scripts": {
+    "dev:2o": "vite --open index-2o.html"
+  }
+}
+```
+
+---
+
+## src/web/patterns.ts (NEW — detector core)
+
+```ts
+import type { Grid2D } from '../runtime/grid.js';
+
+export type PatternTag = {
+  step: number;
+  type: 'still' | 'oscillator' | 'spaceship' | 'dieout';
+  period?: number;
+  offset?: { dx: number; dy: number }; // translation per period for spaceships
+  size: number;                         // alive cells in bounding box
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+};
+
+function aliveCoords(grid: Grid2D): { x: number; y: number }[] {
+  const out: { x: number; y: number }[] = [];
+  for (let y = 0; y < grid.height; y++) {
+    for (let x = 0; x < grid.width; x++) {
+      const m = (grid as any).cells[y][x];
+      if (m?.state?.alive) out.push({ x, y });
+    }
+  }
+  return out;
+}
+
+function bbox(coords: { x: number; y: number }[]) {
+  if (!coords.length) return { x0: 0, y0: 0, x1: -1, y1: -1 };
+  let x0 = coords[0].x, y0 = coords[0].y, x1 = coords[0].x, y1 = coords[0].y;
+  for (const c of coords) { if (c.x < x0) x0 = c.x; if (c.y < y0) y0 = c.y; if (c.x > x1) x1 = c.x; if (c.y > y1) y1 = c.y; }
+  return { x0, y0, x1, y1 };
+}
+
+function normalize(coords: { x: number; y: number }[]) {
+  if (!coords.length) return { norm: [] as {x:number;y:number}[], tx: 0, ty: 0 };
+  const { x0, y0 } = bbox(coords);
+  const norm = coords.map(c => ({ x: c.x - x0, y: c.y - y0 })).sort((a,b)=> a.y-b.y || a.x-b.x);
+  return { norm, tx: x0, ty: y0 };
+}
+
+function hashCoords(coords: { x: number; y: number }[]): string {
+  return coords.map(c => `${c.x}:${c.y}`).join(';');
+}
+
+export class PatternDetector {
+  private byShape = new Map<string, { step: number; tx: number; ty: number; size: number }[]>();
+  private lastAlive = 0;
+  constructor(private maxPeriod = 8, private historyLimit = 512) {}
+
+  /**
+   * Analyze current grid at a given step. Returns zero or more tags.
+   * Heuristics:
+   *  - If alive==0 and lastAlive>0 → dieout
+   *  - If same normalized shape seen before at step' with Δstep=p<=maxPeriod:
+   *      dx = tx - tx', dy = ty - ty'; if (dx==dy==0): oscillator(period=p); else spaceship(period=p, offset)
+   *  - If p==1 and no translation: still
+   */
+  analyze(grid: Grid2D, step: number): PatternTag[] {
+    const coords = aliveCoords(grid);
+    const alive = coords.length;
+    const tags: PatternTag[] = [];
+
+    if (alive === 0 && this.lastAlive > 0) {
+      tags.push({ step, type: 'dieout', size: 0, bbox: { x0:0,y0:0,x1:-1,y1:-1 } });
+    }
+
+    if (alive > 0) {
+      const box = bbox(coords);
+      const { norm, tx, ty } = normalize(coords);
+      const shapeHash = hashCoords(norm);
+      const rec = this.byShape.get(shapeHash) || [];
+
+      // search recent occurrences within maxPeriod window
+      for (let i = rec.length - 1; i >= 0; i--) {
+        const prev = rec[i];
+        const period = step - prev.step;
+        if (period <= 0 || period > this.maxPeriod) continue;
+        const dx = tx - prev.tx; const dy = ty - prev.ty;
+        if (dx === 0 && dy === 0) {
+          // oscillator (includes still if period==1)
+          const type = period === 1 ? 'still' : 'oscillator';
+          tags.push({ step, type, period, size: alive, bbox: box });
+          break;
+        } else {
+          // spaceship
+          tags.push({ step, type: 'spaceship', period, offset: { dx, dy }, size: alive, bbox: box });
+          break;
+        }
+      }
+
+      // record occurrence
+      rec.push({ step, tx, ty, size: alive });
+      if (rec.length > this.historyLimit) rec.shift();
+      this.byShape.set(shapeHash, rec);
+    }
+
+    this.lastAlive = alive;
+    return tags;
+  }
+}
+```
+
+---
+
+## src/web/detect-main.ts (NEW — single‑grid UI with tagging)
+
+```ts
+import { Grid2D } from '../runtime/grid.js';
+import { Interpreter, type Rule } from '../runtime/interpreter.js';
+import { Moore, VonNeumann, Toroidal } from '../runtime/topology/index.js';
+import { Monad } from '../runtime/monad.js';
+import { Tracer } from '../debug/trace.js';
+import { PatternDetector } from './patterns.js';
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const canvas = $('grid') as HTMLCanvasElement; const ctx = canvas.getContext('2d')!;
+const playBtn = $('play'); const stepBtn = $('step'); const clearBtn = $('clear');
+const speed = $('speed') as HTMLInputElement; const speedLabel = $('speedLabel');
+const topo = $('topo') as HTMLSelectElement; const edges = $('edges') as HTMLSelectElement;
+const bs = $('bs') as HTMLInputElement; const apply = $('apply');
+const randomBtn = $('random'); const gliderBtn = $('glider');
+const tagList = $('tags'); const maxP = $('maxP') as HTMLInputElement; const autoChk = $('auto') as HTMLInputElement; const exportBtn = $('exportTags');
+
+function rulesFromBS(input: string): Rule[] {
+  const s = input.trim().toUpperCase();
+  const m = s.match(/^(?:B([0-8]*)\/?S([0-8]*))$|^(?:S([0-8]*)\/?B([0-8]*))$/);
+  if (!m) throw new Error('Invalid rule (expected B…/S…)');
+  const B = (m[1] ?? m[4] ?? '').split('').filter(Boolean).map(Number);
+  const S = (m[2] ?? m[3] ?? '').split('').filter(Boolean).map(Number);
+  return [
+    { kind: 'if', condition: (ctx, env) => !!ctx.state.alive, then: (ctx, env) => { const n = env?.countNeighbors(n => !!n.state.alive) ?? 0; if (!S.includes(n)) env?.mut?.set('state.alive', false); } },
+    { kind: 'unless', condition: (ctx, env) => !!ctx.state.alive, then: (ctx, env) => { const n = env?.countNeighbors(n => !!n.state.alive) ?? 0; if (B.includes(n)) env?.mut?.set('state.alive', true); } },
+  ];
+}
+
+let rules = rulesFromBS(bs.value || 'B3/S23');
+const interpreter = new Interpreter(rules);
+let width = 50, height = 36; let cell = 14;
+function makeTopo(){ const base = topo.value==='VonNeumann'? new VonNeumann() : new Moore(); return edges.value==='Wrap'? new Toroidal(base, ()=>({width,height})) : base; }
+let grid = new Grid2D(width, height, interpreter, makeTopo());
+const tracer = new Tracer();
+let stepNum = 0;
+let playing = false; let ms = Number(speed.value)||220; function setSpeed(){ speedLabel.textContent = `${ms} ms/step`; } setSpeed();
+
+let detector = new PatternDetector(Number(maxP.value)||8, 512);
+
+function draw(){
+  canvas.width = width*cell; canvas.height = height*cell;
+  ctx.fillStyle = '#0a0e11'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#e8eef2';
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++) { const m=(grid as any).cells[y][x]; if (m?.state?.alive) ctx.fillRect(x*cell,y*cell,cell,cell); }
+  // grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  for (let x=0;x<=width;x++){ ctx.beginPath(); ctx.moveTo(x*cell+0.5,0); ctx.lineTo(x*cell+0.5,canvas.height); ctx.stroke(); }
+  for (let y=0;y<=height;y++){ ctx.beginPath(); ctx.moveTo(0,y*cell+0.5); ctx.lineTo(canvas.width,y*cell+0.5); ctx.stroke(); }
+}
+
+function appendTags(tags: ReturnType<PatternDetector['analyze']>){
+  for (const t of tags){
+    const li = document.createElement('li');
+    const loc = `bbox=(${t.bbox.x0},${t.bbox.y0})→(${t.bbox.x1},${t.bbox.y1})`;
+    const meta = t.type==='spaceship' ? ` period=${t.period} offset=(${t.offset?.dx},${t.offset?.dy})` : t.period? ` period=${t.period}` : '';
+    li.textContent = `step ${t.step}: ${t.type}${meta} size=${t.size} ${loc}`;
+    tagList.appendChild(li);
+  }
+}
+
+function tick(){
+  grid.tick(tracer); stepNum++;
+  if (autoChk.checked){ detector = new PatternDetector(Number(maxP.value)||8, 512); /* re-init limit if changed? keep history? */ }
+  const tags = autoChk.checked ? detector.analyze(grid, stepNum) : [];
+  if (tags.length) appendTags(tags);
+  draw();
+}
+
+function loop(){ if(!playing) return; const t0=performance.now(); tick(); const dt=Math.max(0, ms-(performance.now()-t0)); setTimeout(loop, dt); }
+
+// Controls
+playBtn.onclick = () => { playing=!playing; playBtn.textContent = playing? '⏸ Pause':'▶︎ Play'; if(playing) loop(); };
+stepBtn.onclick = () => { if(!playing) tick(); };
+clearBtn.onclick = () => { for (let y=0;y<height;y++) for(let x=0;x<width;x++) (grid as any).cells[y][x]=null; draw(); };
+speed.oninput = () => { ms = Number(speed.value)||220; setSpeed(); };
+apply.onclick = () => { rules = rulesFromBS(bs.value||'B3/S23'); (interpreter as any).rules = rules; };
+randomBtn.onclick = () => { const p=0.2; for (let y=0;y<height;y++) for(let x=0;x<width;x++) (grid as any).cells[y][x] = Math.random()<p? new Monad({alive:true}):null; draw(); };
+gliderBtn.onclick = () => { const cx=Math.floor(width/2), cy=Math.floor(height/2); const set=(x:number,y:number)=> (grid as any).cells[y][x]=new Monad({alive:true}); set(cx+1,cy);set(cx+2,cy+1);set(cx,cy+2);set(cx+1,cy+2);set(cx+2,cy+2); draw(); };
+
+topo.onchange = edges.onchange = () => { grid = new Grid2D(width, height, interpreter, makeTopo()); draw(); };
+
+exportBtn.onclick = () => {
+  const rows = Array.from(tagList.children).map(li => (li as HTMLLIElement).innerText);
+  const blob = new Blob([rows.join('\n')], {type:'text/plain'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `tags-${Date.now()}.txt`; a.click(); URL.revokeObjectURL(a.href);
+};
+
+draw();
+```
+
+---
+
+## index-2o.html (NEW — launch 2O UI)
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MPL 2O – Pattern Detection & Tagging</title>
+  <style>
+    :root { --bg:#0f1214; --fg:#e8eef2; --muted:#8aa1b1; --accent:#56b6c2; }
+    body { margin:0; font:14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:12px 16px; border-bottom:1px solid #1b2227; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:16px; margin:0 12px 0 0; color:var(--accent); }
+    main { display:grid; grid-template-columns: 300px 1fr; gap:16px; padding:16px; }
+    .panel { background:#101418; border:1px solid #1b2227; border-radius:12px; padding:12px; }
+    .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    label { color:var(--muted); }
+    button, select, input { background:#151a1f; color:var(--fg); border:1px solid #242d34; border-radius:8px; padding:6px 10px; }
+    button { cursor:pointer; }
+    canvas { background:#0a0e11; border:1px solid #1b2227; border-radius:8px; image-rendering: pixelated; }
+    ul { margin:0; padding-left:18px; max-height: 40vh; overflow:auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MPL Stage 2O – Automated Pattern Detection & Tagging</h1>
+    <small>Still/oscillator/spaceship/die‑out · live tags · export</small>
+  </header>
+  <main>
+    <aside class="panel">
+      <div class="row">
+        <button id="play">▶︎ Play</button>
+        <button id="step">Step</button>
+        <button id="clear">Clear</button>
+      </div>
+      <div class="row">
+        <label>Speed</label>
+        <input id="speed" type="range" min="50" max="800" value="220" />
+        <small id="speedLabel"></small>
+      </div>
+      <div class="row">
+        <label>Topology</label>
+        <select id="topo"><option>Moore</option><option>VonNeumann</option></select>
+        <label>Edges</label>
+        <select id="edges"><option>Clip</option><option>Wrap</option></select>
+      </div>
+      <div class="row">
+        <label>B/S Rule</label>
+        <input id="bs" value="B3/S23" />
+        <button id="apply">Apply</button>
+      </div>
+      <div class="row">
+        <button id="glider">Seed Glider</button>
+        <button id="random">Randomize</button>
+      </div>
+      <hr />
+      <div class="row">
+        <label>Auto‑detect</label>
+        <input id="auto" type="checkbox" checked />
+        <label>Max period</label>
+        <input id="maxP" type="number" value="8" min="1" max="32" />
+        <button id="exportTags">Export Tags</button>
+      </div>
+      <div class="row"><strong>Tags</strong></div>
+      <ul id="tags"></ul>
+    </aside>
+    <section class="panel">
+      <canvas id="grid" width="700" height="504"></canvas>
+    </section>
+  </main>
+  <script type="module" src="/src/web/detect-main.ts"></script>
+</body>
+</html>
+```
+
+---
+
+## README addendum (2O)
+
+````md
+### 2O – Automated Pattern Detection & Tagging
+
+Run the 2O UI:
+```bash
+npm i
+npm run dev:2o
+````
+
+* Toggle **Auto-detect**, set **Max period**, and watch tags appear while stepping/playing.
+* Exports a simple **tags.txt** with human-readable entries.
+
+**How detection works:**
+
+* Each tick we collect alive coordinates, compute a normalized **shape signature** (translation-invariant), and compare to the last N occurrences.
+* If the same shape reappears after p steps:
+
+  * **dx=dy=0** → **oscillator** (p=1 → **still**)
+  * **dx or dy ≠ 0** → **spaceship**, with offset `(dx,dy)` per cycle
+* If the population drops to zero, we tag a **dieout**.
+
+This heuristic is fast and robust for common Life-like patterns without expensive graph search or rotation/reflection canonicalization.
+
+```
+```

@@ -1,0 +1,364 @@
+# MPL – Stage 2 (All‑in‑One with 2B) – Full Project
+
+Below is the complete project you can copy directly into your repo. Create the folders/files exactly as shown. After pasting, run:
+
+```bash
+npm i
+npm run demo
+```
+
+---
+
+## Directory Tree
+
+```
+MPL-Stage-2/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ runtime/
+│  │  ├─ interpreter.ts
+│  │  ├─ monad.ts
+│  │  ├─ grid.ts
+│  │  └─ topology/
+│  │     └─ index.ts
+│  ├─ debug/
+│  │  └─ trace.ts
+│  ├─ emotional/
+│  │  └─ types.ts
+│  └─ utils/
+│     └─ io.ts
+└─ examples/
+   └─ run.ts
+```
+
+---
+
+## package.json
+
+```json
+{
+  "name": "mpl-stage-2",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "ts-node examples/run.ts"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
+```
+
+---
+
+## tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src", "examples"]
+}
+```
+
+---
+
+## README.md
+
+````md
+# MPL – Stage 2 (All-in-One with 2B)
+
+- ✅ 2A: Rule engine with snapshot reads + staged writes (function-form rules).
+- ✅ 2B: Neighbor-aware env (`neighbors`, `countNeighbors`, `sumNeighbors`), `Grid2D` + `Topology` (Moore, VonNeumann, Custom).
+- 🔧 2C–2E: Debugger, emotional metadata, export/import scaffolds.
+
+## Run the demo
+```bash
+npm i
+npm run demo
+````
+
+This runs Conway's Game of Life and prints ASCII grids (█ alive / · dead).
+
+```
+```
+
+---
+
+## src/runtime/interpreter.ts
+
+```ts
+export type Context = {
+  state: Record<string, any>;
+  memory: Record<string, any>;
+  step: number;
+};
+
+export type NeighborSnapshot = { state: Record<string, any>; memory: Record<string, any> };
+
+export type Env = {
+  neighbors: NeighborSnapshot[];
+  countNeighbors: (pred: (n: NeighborSnapshot) => boolean) => number;
+  sumNeighbors: (map: (n: NeighborSnapshot) => number) => number;
+};
+
+export type Rule = {
+  kind: 'if' | 'unless';
+  condition: (ctx: Context, env?: Env) => boolean;
+  then: (ctx: Context, env?: Env) => void;
+  otherwise?: (ctx: Context, env?: Env) => void;
+};
+
+export class Interpreter {
+  rules: Rule[];
+  constructor(rules: Rule[]) { this.rules = rules; }
+
+  tick(contexts: Context[], envs?: (Env | undefined)[]): Context[] {
+    const out: Context[] = [];
+    for (let i = 0; i < contexts.length; i++) {
+      const ctx = contexts[i];
+      const env = envs?.[i];
+      const nextState = { ...ctx.state };
+      const nextMemory = { ...ctx.memory };
+      const newCtx: Context = { state: nextState, memory: nextMemory, step: ctx.step + 1 };
+      for (const r of this.rules) {
+        const cond = r.condition(ctx, env);
+        if ((r.kind === 'if' && cond) || (r.kind === 'unless' && !cond)) r.then(newCtx, env);
+        else if (r.otherwise) r.otherwise(newCtx, env);
+      }
+      out.push(newCtx);
+    }
+    return out;
+  }
+}
+```
+
+---
+
+## src/runtime/monad.ts
+
+```ts
+import type { Context } from './interpreter.js';
+export class Monad {
+  state: Record<string, any>;
+  memory: Record<string, any>;
+  constructor(state: Record<string, any> = {}, memory: Record<string, any> = {}) {
+    this.state = state; this.memory = memory;
+  }
+  toContext(step: number): Context { return { state: { ...this.state }, memory: { ...this.memory }, step }; }
+  commitFromContext(ctx: Context): void { this.state = { ...ctx.state }; this.memory = { ...ctx.memory }; }
+}
+```
+
+---
+
+## src/runtime/topology/index.ts
+
+```ts
+export type Coord = { x: number; y: number };
+export interface Topology { neighbors(of: Coord): Coord[]; }
+
+export class VonNeumann implements Topology {
+  neighbors(of: Coord): Coord[] {
+    return [
+      { x: of.x, y: of.y - 1 },
+      { x: of.x - 1, y: of.y },
+      { x: of.x + 1, y: of.y },
+      { x: of.x, y: of.y + 1 },
+    ];
+  }
+}
+
+export class Moore implements Topology {
+  neighbors(of: Coord): Coord[] {
+    const n: Coord[] = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        n.push({ x: of.x + dx, y: of.y + dy });
+      }
+    }
+    return n;
+  }
+}
+
+export class Custom implements Topology {
+  fn: (c: Coord) => Coord[];
+  constructor(fn: (c: Coord) => Coord[]) { this.fn = fn; }
+  neighbors(of: Coord): Coord[] { return this.fn(of); }
+}
+```
+
+---
+
+## src/runtime/grid.ts
+
+```ts
+import type { Interpreter } from './interpreter.js';
+import type { Env, Context, NeighborSnapshot } from './interpreter.js';
+import { Monad } from './monad.js';
+import type { Topology, Coord } from './topology/index.js';
+
+function snap(m: Monad | null): NeighborSnapshot {
+  if (!m) return { state: {}, memory: {} };
+  return { state: { ...m.state }, memory: { ...m.memory } };
+}
+
+export class Grid2D {
+  width: number; height: number;
+  cells: (Monad | null)[][];
+  stepCount = 0;
+  interpreter: Interpreter;
+  topology: Topology;
+
+  constructor(width: number, height: number, interpreter: Interpreter, topology: Topology) {
+    this.width = width; this.height = height; this.interpreter = interpreter; this.topology = topology;
+    this.cells = Array.from({length: height}, () => Array.from({length: width}, () => null));
+  }
+
+  inBounds(c: Coord): boolean { return c.x >= 0 && c.x < this.width && c.y >= 0 && c.y < this.height; }
+
+  place(c: Coord, m: Monad) { if (this.inBounds(c)) this.cells[c.y][c.x] = m; }
+
+  tick(): void {
+    const step = this.stepCount;
+    const contexts: Context[] = [];
+    const envs: Env[] = [];
+    const positions: Coord[] = [];
+
+    for (let y = 0; y < this.height; y++) {
+      for (let x = 0; x < this.width; x++) {
+        const m = this.cells[y][x];
+        if (!m) continue;
+        positions.push({ x, y });
+        contexts.push({ state: { ...m.state }, memory: { ...m.memory }, step });
+        const neighCoords = this.topology.neighbors({ x, y }).filter(c => this.inBounds(c));
+        const neighSnaps = neighCoords.map(c => snap(this.cells[c.y][c.x]));
+        const env: Env = {
+          neighbors: neighSnaps,
+          countNeighbors: (pred) => neighSnaps.reduce((acc, n) => acc + (pred(n) ? 1 : 0), 0),
+          sumNeighbors: (map) => neighSnaps.reduce((acc, n) => acc + (map(n) || 0), 0),
+        };
+        envs.push(env);
+      }
+    }
+
+    const next = this.interpreter.tick(contexts, envs);
+    next.forEach((ctx, i) => {
+      const pos = positions[i];
+      const m = this.cells[pos.y][pos.x];
+      if (m) { m.state = ctx.state; m.memory = ctx.memory; }
+    });
+
+    this.stepCount += 1;
+  }
+
+  snapshot(): any {
+    return this.cells.map(row => row.map(m => m ? { state: { ...m.state }, memory: { ...m.memory } } : null));
+  }
+
+  toAscii(aliveKey: string = 'alive'): string {
+    return this.cells.map(row => row.map(m => (m && m.state?.[aliveKey]) ? '█' : '·').join('')).join('\n');
+  }
+}
+```
+
+---
+
+## src/debug/trace.ts
+
+```ts
+export type TraceEvent =
+  | { type: 'tick-start'; step: number }
+  | { type: 'rule'; index: number; condition: any; taken: boolean }
+  | { type: 'assign'; path: string; op: string; value: any }
+  | { type: 'tick-end'; step: number };
+
+export class Tracer {
+  events: TraceEvent[] = [];
+  clear(){ this.events = []; }
+  push(e: TraceEvent){ this.events.push(e); }
+  take(): TraceEvent[] { const out = this.events; this.events = []; return out; }
+}
+```
+
+---
+
+## src/emotional/types.ts
+
+```ts
+export type Adequacy = { alpha: number; chi?: number; dA?: number };
+export type EmotionalState = { joy?: number; sadness?: number; meta?: Record<string, number> };
+export type EmotionalMetadata = { adequacy?: Adequacy; emotion?: EmotionalState };
+```
+
+---
+
+## src/utils/io.ts
+
+```ts
+import fs from 'fs';
+export type Snapshot = any;
+export function exportSimulation(path: string, snapshot: Snapshot){ fs.writeFileSync(path, JSON.stringify(snapshot, null, 2), 'utf-8'); }
+export function importSimulation(path: string): Snapshot { const raw = fs.readFileSync(path, 'utf-8'); return JSON.parse(raw); }
+```
+
+---
+
+## examples/run.ts
+
+```ts
+import { Interpreter, type Rule } from '../src/runtime/interpreter.js';
+import { Grid2D } from '../src/runtime/grid.js';
+import { Monad } from '../src/runtime/monad.js';
+import { Moore } from '../src/runtime/topology/index.js';
+
+// Conway's Game of Life using neighbor-aware env
+const rules: Rule[] = [
+  {
+    kind: 'if',
+    condition: (ctx, env) => !!ctx.state.alive,
+    then: (ctx, env) => {
+      const n = env?.countNeighbors(n => !!n.state.alive) ?? 0;
+      if (n < 2 || n > 3) ctx.state.alive = false;
+    }
+  },
+  {
+    kind: 'unless',
+    condition: (ctx, env) => !!ctx.state.alive,
+    then: (ctx, env) => {
+      const n = env?.countNeighbors(n => !!n.state.alive) ?? 0;
+      if (n === 3) ctx.state.alive = true;
+    }
+  }
+];
+
+const interpreter = new Interpreter(rules);
+const W=10, H=10;
+const grid = new Grid2D(W, H, interpreter, new Moore());
+
+// Seed a vertical blinker
+grid.place({x:4, y:4}, new Monad({ alive: true }));
+grid.place({x:4, y:5}, new Monad({ alive: true }));
+grid.place({x:4, y:6}, new Monad({ alive: true }));
+
+function print(step: number){
+  console.log(`\nStep ${step}\n` + grid.toAscii('alive'));
+}
+print(0);
+for (let i=1; i<=6; i++){
+  grid.tick();
+  print(i);
+}
+```

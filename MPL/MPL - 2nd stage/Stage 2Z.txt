@@ -1,0 +1,490 @@
+# MPL – Stage 2Z (Pack Signing Keys + Reproducible Releases)
+
+Stage **2Z** completes the distribution story: you can **sign** rule packs & experiment bundles, **verify** them across UI/CLI, and publish **reproducible releases** with pinned hashes.
+
+> Builds on 2X (gallery + verify) and 2Y (CLI + CI). Node ≥ 18.
+
+---
+
+## What’s new in 2Z
+
+* **Deterministic JSON** canonicalizer so the same content → the same bytes → the same hash.
+* **Signing keys** (ECDSA P‑256 / SHA‑256) with local keypair generation & export/import.
+* **CLI signing & verification** for **packs** and **.mplbundle** experiments.
+* **Release manifest** (`release.mpl.json`) that pins:
+
+  * rule packs (URL → SHA‑256, signature, signer key id)
+  * experiment bundles (filename → SHA‑256, signature)
+* **CI workflow** to build, sign, and publish a **reproducible asset set**.
+
+---
+
+## Directory Tree (delta)
+
+`MPL-Stage-2/
+├─ package.json
+├─ README.md
+├─ .github/workflows/
+│  └─ mpl-release.yml                 # NEW: reproducible release pipeline
+├─ src/
+│  ├─ security/
+│  │  ├─ canonical.ts                 # NEW: stable stringify + hash
+│  │  ├─ keys.ts                      # NEW: keypair gen/load/save (JWK)
+│  │  ├─ signing.ts                   # NEW: sign/verify helpers (node + web)
+│  │  └─ key-id.ts                    # NEW: derive short key id from public JWK
+│  ├─ cli/
+│  │  ├─ commands/
+│  │  │  ├─ keygen.ts                 # NEW: create keypair (JWK files)
+│  │  │  ├─ sign.ts                   # NEW: sign pack or bundle → .sig.json
+│  │  │  ├─ verify.ts                 # NEW: verify signature(s)
+│  │  │  └─ release.ts                # NEW: compose release manifest (pins + sigs)
+│  │  └─ index.ts                     # UPDATED: wires new commands
+│  └─ web/
+│     └─ verify-2z.ts                 # NEW: browser verify using canonicalization
+└─ release.schema.json                # NEW: JSON Schema for release manifests`
+
+Add scripts to **package.json**:
+
+```json
+{
+  "scripts": {
+    "dev:2z": "tsx src/cli/index.ts --help"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}
+```
+
+---
+
+## src/security/canonical.ts (NEW)
+
+```ts
+import { createHash } from 'node:crypto';
+
+// Canonical JSON: sort object keys lexicographically, stable formatting, no whitespace
+export function canonicalize(value: any): string {
+  const seen = new WeakSet();
+  const norm = (v: any): any => {
+    if (v === null || typeof v !== 'object') return v;
+    if (seen.has(v)) throw new Error('Cannot canonicalize cyclic structures');
+    seen.add(v);
+    if (Array.isArray(v)) return v.map(norm);
+    const out: Record<string, any> = {};
+    for (const k of Object.keys(v).sort()) out[k] = norm(v[k]);
+    return out;
+  };
+  return JSON.stringify(norm(value));
+}
+
+export function sha256HexCanonical(value: any): string {
+  const h = createHash('sha256');
+  h.update(canonicalize(value));
+  return h.digest('hex');
+}
+```
+
+---
+
+## src/security/key-id.ts (NEW)
+
+```ts
+// Derive a short, portable key id from a P-256 public JWK
+export function keyIdFromJwk(jwk: JsonWebKey): string {
+  const x = jwk.x ?? ''; const y = jwk.y ?? '';
+  const raw = `${jwk.kty}|${jwk.crv}|${x}|${y}`;
+  // Tiny FNV-1a like hash to get a short id
+  let h = 2166136261 >>> 0;
+  for (let i=0;i<raw.length;i++){ h ^= raw.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'p256-' + (h >>> 0).toString(16);
+}
+```
+
+---
+
+## src/security/keys.ts (NEW)
+
+```ts
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+export type Keypair = { privateJwk: JsonWebKey; publicJwk: JsonWebKey };
+
+export async function generateKeypair(): Promise<Keypair> {
+  const key = await (globalThis.crypto as any).subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const privateJwk = await (globalThis.crypto as any).subtle.exportKey('jwk', key.privateKey);
+  const publicJwk = await (globalThis.crypto as any).subtle.exportKey('jwk', key.publicKey);
+  return { privateJwk, publicJwk };
+}
+
+export async function saveKeypair(dir: string, kp: Keypair){
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'private.jwk.json'), JSON.stringify(kp.privateJwk, null, 2), 'utf8');
+  await fs.writeFile(path.join(dir, 'public.jwk.json'), JSON.stringify(kp.publicJwk, null, 2), 'utf8');
+}
+
+export async function loadPrivateJwk(p: string): Promise<JsonWebKey>{
+  return JSON.parse(await fs.readFile(p, 'utf8')) as JsonWebKey;
+}
+export async function loadPublicJwk(p: string): Promise<JsonWebKey>{
+  return JSON.parse(await fs.readFile(p, 'utf8')) as JsonWebKey;
+}
+```
+
+---
+
+## src/security/signing.ts (NEW)
+
+```ts
+// Works in Node (via global crypto) and browser
+export async function importPriv(jwk: JsonWebKey){
+  return await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+}
+export async function importPub(jwk: JsonWebKey){
+  return await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+}
+
+export async function signBytes(bytes: Uint8Array, jwk: JsonWebKey): Promise<string> {
+  const key = await importPriv(jwk);
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, bytes);
+  return Buffer.from(new Uint8Array(sig)).toString('base64');
+}
+
+export async function verifyBytes(bytes: Uint8Array, b64: string, jwk: JsonWebKey): Promise<boolean> {
+  const key = await importPub(jwk);
+  const sig = Uint8Array.from(Buffer.from(b64, 'base64'));
+  return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sig, bytes);
+}
+```
+
+---
+
+## src/cli/commands/keygen.ts (NEW)
+
+```ts
+import { Command } from 'commander';
+import { generateKeypair, saveKeypair } from '../../security/keys.js';
+import { keyIdFromJwk } from '../../security/key-id.js';
+
+export function keygenCmd(){
+  return new Command('keygen')
+    .description('Generate a P-256 keypair (JWK)')
+    .requiredOption('--out <dir>', 'directory to write {public,private}.jwk.json')
+    .action(async (opts)=>{
+      const kp = await generateKeypair();
+      await saveKeypair(opts.out, kp);
+      const kid = keyIdFromJwk(kp.publicJwk);
+      console.log('Generated key id', kid);
+      console.log('Public key →', opts.out + '/public.jwk.json');
+      console.log('Private key →', opts.out + '/private.jwk.json');
+    });
+}
+```
+
+---
+
+## src/cli/commands/sign.ts (NEW)
+
+```ts
+import { Command } from 'commander';
+import { promises as fs } from 'node:fs';
+import { canonicalize } from '../../security/canonical.js';
+import { loadPrivateJwk } from '../../security/keys.js';
+import { signBytes } from '../../security/signing.js';
+import { keyIdFromJwk } from '../../security/key-id.js';
+
+export function signCmd(){
+  return new Command('sign')
+    .description('Sign a rule pack (source file) or .mplbundle')
+    .requiredOption('--in <file>', 'input file (pack .ts/.js or .mplbundle)')
+    .requiredOption('--key <file>', 'private JWK (P-256)')
+    .requiredOption('--out <file>', 'output signature json')
+    .option('--type <kind>', 'pack|bundle', 'bundle')
+    .action(async (opts)=>{
+      const jwk = await loadPrivateJwk(opts.key);
+      const kid = keyIdFromJwk({ ...jwk, d: undefined });
+      const raw = await fs.readFile(opts.in, 'utf8');
+      const payload = opts.type === 'bundle' ? canonicalize(JSON.parse(raw)) : raw; // code is signed as-is
+      const sig = await signBytes(new TextEncoder().encode(payload), jwk);
+      const out = { kind: opts.type, kid, sig, algo: 'P-256/SHA-256', created: new Date().toISOString() };
+      await fs.writeFile(opts.out, JSON.stringify(out, null, 2), 'utf8');
+      console.log('Wrote signature →', opts.out);
+    });
+}
+```
+
+---
+
+## src/cli/commands/verify.ts (NEW)
+
+```ts
+import { Command } from 'commander';
+import { promises as fs } from 'node:fs';
+import { canonicalize } from '../../security/canonical.js';
+import { loadPublicJwk } from '../../security/keys.js';
+import { verifyBytes } from '../../security/signing.js';
+
+export function verifyCmd(){
+  return new Command('verify')
+    .description('Verify a signature against a public JWK')
+    .requiredOption('--in <file>', 'input file (pack code or .mplbundle)')
+    .requiredOption('--sig <file>', 'signature json from `mpl sign`')
+    .requiredOption('--pub <file>', 'public JWK (P-256)')
+    .option('--type <kind>', 'pack|bundle', 'bundle')
+    .action(async (opts)=>{
+      const pub = await loadPublicJwk(opts.pub);
+      const sigObj = JSON.parse(await fs.readFile(opts.sig, 'utf8'));
+      const raw = await fs.readFile(opts.in, 'utf8');
+      const payload = opts.type === 'bundle' ? canonicalize(JSON.parse(raw)) : raw;
+      const ok = await verifyBytes(new TextEncoder().encode(payload), sigObj.sig, pub);
+      console.log(ok ? 'OK: signature valid' : 'FAIL: signature invalid');
+      if (!ok) process.exitCode = 1;
+    });
+}
+```
+
+---
+
+## src/cli/commands/release.ts (NEW)
+
+```ts
+import { Command } from 'commander';
+import { promises as fs } from 'node:fs';
+import { sha256HexCanonical } from '../../security/canonical.js';
+import { keyIdFromJwk } from '../../security/key-id.js';
+import { loadPrivateJwk } from '../../security/keys.js';
+import { signBytes } from '../../security/signing.js';
+
+/**
+ * Release manifest schema v1
+ * {
+ *   schema: 'mpl-release@1', created, signer: { kid },
+ *   packs: [{ id, url, sha256, signature? }],
+ *   bundles: [{ name, sha256, signature? }]
+ * }
+ */
+
+export function releaseCmd(){
+  return new Command('release')
+    .description('Compose a reproducible release manifest from packs (+hash) and bundles')
+    .requiredOption('--out <file>', 'write manifest here')
+    .option('--pack <id=url>', 'pack id=url (repeatable)', (v,acc)=>{acc.push(v); return acc;}, [] as string[])
+    .option('--bundle <name=path>', 'bundle name=path (repeatable)', (v,acc)=>{acc.push(v); return acc;}, [] as string[])
+    .option('--sign <privJwk>', 'sign manifest with private key')
+    .action( async (opts)=>{
+      const packs = [] as any[]; const bundles = [] as any[];
+      for (const spec of opts.pack as string[]){
+        const [id, url] = spec.split('=');
+        const code = await (await fetch(url)).text();
+        packs.push({ id, url, sha256: sha256HexCanonical(code) });
+      }
+      for (const spec of opts.bundle as string[]){
+        const [name, path] = spec.split('=');
+        const raw = await fs.readFile(path, 'utf8');
+        bundles.push({ name, sha256: sha256HexCanonical(JSON.parse(raw)) });
+      }
+      const manifest:any = { schema:'mpl-release@1', created:new Date().toISOString(), packs, bundles };
+      if (opts.sign){
+        const jwk = await loadPrivateJwk(opts.sign); const kid = keyIdFromJwk({ ...jwk, d: undefined });
+        const bytes = new TextEncoder().encode(JSON.stringify(manifest));
+        const sig = await signBytes(bytes, jwk);
+        manifest.signer = { kid, algo:'P-256/SHA-256' };
+        manifest.signature = sig;
+      }
+      await fs.writeFile(opts.out, JSON.stringify(manifest, null, 2), 'utf8');
+      console.log('Wrote manifest →', opts.out);
+    });
+}
+```
+
+---
+
+## src/cli/index.ts (UPDATED)
+
+```ts
+#!/usr/bin/env node
+import { Command } from 'commander';
+import { bundleCmd } from './commands/bundle.js';
+import { validateCmd } from './commands/validate.js';
+import { sweepCmd } from './commands/sweep.js';
+import { paretoCmd } from './commands/pareto.js';
+import { shareCmd } from './commands/share.js';
+import { keygenCmd } from './commands/keygen.js';
+import { signCmd } from './commands/sign.js';
+import { verifyCmd } from './commands/verify.js';
+import { releaseCmd } from './commands/release.js';
+
+const program = new Command();
+program.name('mpl').description('MPL CLI').version('2Z.0.0');
+program.addCommand(bundleCmd());
+program.addCommand(validateCmd());
+program.addCommand(sweepCmd());
+program.addCommand(paretoCmd());
+program.addCommand(shareCmd());
+program.addCommand(keygenCmd());
+program.addCommand(signCmd());
+program.addCommand(verifyCmd());
+program.addCommand(releaseCmd());
+program.parseAsync(process.argv);
+```
+
+---
+
+## release.schema.json (NEW)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/mpl/release.schema.json",
+  "title": "MPL Release Manifest",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "mpl-release@1" },
+    "created": { "type": "string" },
+    "signer": {
+      "type": "object",
+      "properties": { "kid": { "type": "string" }, "algo": { "type": "string" } },
+      "required": ["kid", "algo"],
+      "additionalProperties": false
+    },
+    "signature": { "type": "string" },
+    "packs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string", "format": "uri" },
+          "sha256": { "type": "string" },
+          "signature": { "type": "string" }
+        },
+        "required": ["id", "url", "sha256"],
+        "additionalProperties": false
+      }
+    },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "sha256": { "type": "string" },
+          "signature": { "type": "string" }
+        },
+        "required": ["name", "sha256"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["schema", "created", "packs", "bundles"],
+  "additionalProperties": false
+}
+```
+
+---
+
+## .github/workflows/mpl-release.yml (NEW)
+
+```yaml
+name: mpl-release
+on:
+  workflow_dispatch:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: 'npm' }
+      - run: npm ci
+      - name: Build artifacts
+        run: |
+          mkdir -p out
+          npm run cli -- bundle --rule B3/S23 --seed 123 --steps 200 --size 40x30 --out out/demo.mplbundle
+      - name: Key (example) — use repo/ORG secret in practice
+        run: |
+          mkdir -p keys
+          npm run cli -- keygen --out keys
+      - name: Sign bundle
+        run: |
+          npm run cli -- sign --in out/demo.mplbundle --key keys/private.jwk.json --out out/demo.mplbundle.sig.json --type bundle
+      - name: Compose release manifest
+        run: |
+          npm run cli -- release --bundle demo=out/demo.mplbundle --out out/release.mpl.json --sign keys/private.jwk.json
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/demo.mplbundle
+            out/demo.mplbundle.sig.json
+            out/release.mpl.json
+```
+
+---
+
+## Browser verify hook (optional) — src/web/verify-2z.ts (NEW)
+
+```ts
+import { sha256HexCanonical } from '../security/canonical.js';
+import { verifyBytes } from '../security/signing.js';
+
+export async function verifyBundle(man: any, sigB64: string, pub: JsonWebKey){
+  const canonical = new TextEncoder().encode(JSON.stringify(man));
+  return await verifyBytes(canonical, sigB64, pub);
+}
+```
+
+---
+
+## README addendum (2Z)
+
+````md
+### 2Z – Pack Signing Keys + Reproducible Releases
+
+Generate a keypair:
+```bash
+npm run cli -- keygen --out keys
+````
+
+Sign a bundle:
+
+```bash
+npm run cli -- sign --in out/exp.mplbundle --key keys/private.jwk.json --out out/exp.sig.json --type bundle
+```
+
+Verify:
+
+```bash
+npm run cli -- verify --in out/exp.mplbundle --sig out/exp.sig.json --pub keys/public.jwk.json --type bundle
+```
+
+Compose a release manifest (pins SHA‑256 of packs & bundles, and signs the manifest itself):
+
+```bash
+npm run cli -- release \
+  --pack conway=https://your.host/packs/conway.js \
+  --bundle demo=out/exp.mplbundle \
+  --out out/release.mpl.json \
+  --sign keys/private.jwk.json
+```
+
+Enable the **mpl-release** workflow to produce a reproducible set of artifacts on tag pushes.
+
+**Notes**
+
+* We canonicalize JSON before hashing/signing to make hashes deterministic across platforms.
+* Pack source code is signed **as-is** (no canonicalization), so publish the exact bytes you intend to verify.
+* Keep private keys out of the repo; load from CI secrets or use a dedicated signing service.
+
+```
+```

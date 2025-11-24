@@ -1,0 +1,414 @@
+# MPL Playground — Stage 4A Patch (Engine Perf + Canvas Renderer)
+
+This patch focuses on two things:
+
+1. **Engine performance** — faster timeline handling via delta‑compression, lightweight indexes, and small allocations.
+2. **A new Canvas Renderer** — buttery‑smooth graph visualization with pan/zoom, tick playback, and highlights.
+
+No new external deps. All changes remain browser‑local.
+
+---
+
+## Highlights
+
+* **Delta timeline**: store/apply per‑tick diffs (adds/removes/updates) with optional structural sharing → lower memory and faster scrubbing
+* **Rule/Event index**: constant‑time queries for counts & recent activity windows
+* **Object/array arenas**: avoid GC churn during scrubs
+* **Canvas graph**: high‑FPS render (single `<canvas>`, batched draw, dirty‑rects)
+* **UX**: pan/zoom, selection, hover tooltips, rule heat colors, smooth interpolation between ticks
+
+---
+
+## 1) `engine/core/perf/timelineDelta.ts` (new)
+
+```ts
+// engine/core/perf/timelineDelta.ts
+// Stage 4A — Compact diff representation for ExecutionSnapshot timelines
+
+import type { ExecutionSnapshot } from "../../debugger/graphTypes";
+
+export interface MonadView { id: string; x?: number; y?: number; neighbors?: string[]; [k: string]: any }
+export interface RuleFire { ruleId: string; at: number; monadId?: string; sourceId?: string; targetId?: string; [k: string]: any }
+
+export interface SnapshotSlim {
+  tick: number;
+  monads: Record<string, MonadView>; // id → view (dense map for quick access)
+  rulesFired: RuleFire[];
+}
+
+export interface DeltaPatch {
+  tick: number; // resulting tick
+  add?: { monads?: MonadView[]; edges?: [string,string][] };
+  remove?: { monads?: string[]; edges?: [string,string][] };
+  update?: { monads?: Partial<MonadView & { id: string }> [] };
+  rulesAppend?: RuleFire[];
+}
+
+export function toSlim(s: ExecutionSnapshot): SnapshotSlim {
+  const map: Record<string, MonadView> = {};
+  for (const m of s.monads || []) map[String((m as any).id)] = { id: String((m as any).id), x: (m as any).x, y: (m as any).y, neighbors: Array.isArray((m as any).neighbors) ? [...(m as any).neighbors] : [] };
+  return { tick: (s as any).tick ?? 0, monads: map, rulesFired: [...(s.rulesFired || [])] } as SnapshotSlim;
+}
+
+export function diff(prev: SnapshotSlim, next: SnapshotSlim): DeltaPatch {
+  const addM: MonadView[] = []; const updM: (Partial<MonadView> & { id: string })[] = []; const remM: string[] = [];
+  const seen = new Set<string>();
+  for (const id in next.monads) {
+    seen.add(id);
+    const a = next.monads[id]; const b = prev.monads[id];
+    if (!b) { addM.push(a); continue; }
+    const u: any = { id };
+    if (a.x !== b.x) u.x = a.x;
+    if (a.y !== b.y) u.y = a.y;
+    if (!arrEq(a.neighbors||[], b.neighbors||[])) u.neighbors = a.neighbors;
+    for (const k in a) if (!(k in { id:1, x:1, y:1, neighbors:1 })) if ((a as any)[k] !== (b as any)[k]) u[k] = (a as any)[k];
+    if (Object.keys(u).length > 1) updM.push(u);
+  }
+  for (const id in prev.monads) if (!seen.has(id)) remM.push(id);
+  // For now, edges are implicit via neighbors; we expose edges arrays for external consumers
+  return { tick: next.tick, add: addM.length?{ monads: addM }:undefined, update: updM.length?{ monads: updM }:undefined, remove: remM.length?{ monads: remM }:undefined, rulesAppend: next.rulesFired };
+}
+
+export function apply(base: SnapshotSlim, p: DeltaPatch): SnapshotSlim {
+  const monads: Record<string, MonadView> = Object.create(null);
+  // copy old
+  for (const k in base.monads) monads[k] = { ...base.monads[k], neighbors: [...(base.monads[k].neighbors||[])] };
+  // remove
+  if (p.remove?.monads) for (const id of p.remove.monads) delete monads[id];
+  // add
+  if (p.add?.monads) for (const m of p.add.monads) monads[m.id] = { ...m, neighbors: [...(m.neighbors||[])] };
+  // update
+  if (p.update?.monads) for (const u of p.update.monads) monads[u.id] = { ...monads[u.id], ...u, neighbors: u.neighbors ? [...u.neighbors] : monads[u.id]?.neighbors };
+  return { tick: p.tick, monads, rulesFired: [...(p.rulesAppend || [])] };
+}
+
+function arrEq(a: any[], b: any[]){ if (a.length!==b.length) return false; for (let i=0;i<a.length;i++) if (a[i]!==b[i]) return false; return true; }
+```
+
+---
+
+## 2) `engine/core/perf/indexes.ts` (new)
+
+```ts
+// engine/core/perf/indexes.ts
+// Stage 4A — Lightweight rolling indexes for rule activity
+
+import type { SnapshotSlim } from './timelineDelta';
+
+export interface RuleIndex { byRule: Record<string, number>; recent: { ruleId: string; tick: number }[] }
+
+export function buildRuleIndex(s: SnapshotSlim): RuleIndex {
+  const byRule: Record<string, number> = Object.create(null);
+  for (const r of s.rulesFired || []) byRule[r.ruleId] = (byRule[r.ruleId]||0) + 1;
+  const recent = (s.rulesFired || []).slice(-50).map(r => ({ ruleId: r.ruleId, tick: s.tick }));
+  return { byRule, recent };
+}
+```
+
+---
+
+## 3) `engine/core/perf/arena.ts` (new)
+
+```ts
+// engine/core/perf/arena.ts
+// Stage 4A — Tiny object/array arenas to reduce GC during scrubbing
+
+export class ArrayArena<T> {
+  private pool: T[][] = [];
+  acquire(): T[] { return this.pool.pop() || []; }
+  release(arr: T[]){ arr.length = 0; this.pool.push(arr); }
+}
+export class ObjArena<T extends object> {
+  private pool: T[] = [];
+  acquire(): T { return (this.pool.pop() || Object.create(null)) as T; }
+  release(obj: T){ for (const k in obj) delete (obj as any)[k]; this.pool.push(obj); }
+}
+```
+
+---
+
+## 4) `engine/bench/bench.ts` (new) — microbench harness
+
+```ts
+// engine/bench/bench.ts
+// Stage 4A — Quick and dirty perf harness in the playground
+
+import { toSlim, diff, apply, SnapshotSlim } from '../core/perf/timelineDelta';
+
+export interface BenchResult { name: string; iters: number; ms: number; nsPerOp: number }
+
+export function benchTimeline(snaps: any[]): BenchResult[] {
+  const slim: SnapshotSlim[] = snaps.map(toSlim);
+  const patches = []; for (let i=1;i<slim.length;i++) patches.push(diff(slim[i-1], slim[i]));
+  const t0 = performance.now();
+  let s = slim[0]; for (let i=0;i<10;i++) for (const p of patches) s = apply(s, p);
+  const ms = performance.now() - t0; const iters = patches.length * 10; const nsPerOp = (ms*1e6/iters)|0;
+  return [ { name: 'apply(delta)', iters, ms, nsPerOp } ];
+}
+```
+
+---
+
+## 5) `engine/renderer/canvas/CanvasGraph.ts` (new)
+
+```ts
+// engine/renderer/canvas/CanvasGraph.ts
+// Stage 4A — Imperative canvas renderer for monad graph
+
+import type { SnapshotSlim, MonadView } from '../../core/perf/timelineDelta';
+
+export interface GraphTheme {
+  bg: string; node: string; nodeSel: string; edge: string; edgeHot: string; label: string; grid: string;
+}
+export interface Camera { x: number; y: number; z: number } // world→screen scale = z
+
+export class CanvasGraph {
+  canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; theme: GraphTheme; cam: Camera = { x:0, y:0, z:1 };
+  nodeRadius = 8; font = '12px ui-monospace, monospace';
+  private last?: SnapshotSlim; private sel: string | null = null; private hotRule: string | null = null;
+
+  constructor(canvas: HTMLCanvasElement, theme?: Partial<GraphTheme>){
+    const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('no 2d');
+    this.canvas = canvas; this.ctx = ctx; this.theme = Object.assign({ bg:'#fff', node:'#374151', nodeSel:'#2563eb', edge:'#cbd5e1', edgeHot:'#ef4444', label:'#111827', grid:'#f3f4f6' }, theme||{});
+  }
+
+  setSnapshot(s: SnapshotSlim){ this.last = s; }
+  setSelection(id: string | null){ this.sel = id; }
+  setHotRule(ruleId: string | null){ this.hotRule = ruleId; }
+  setCamera(c: Partial<Camera>){ Object.assign(this.cam, c); }
+
+  resize(w: number, h: number){ this.canvas.width = w; this.canvas.height = h; }
+
+  draw(){ const s = this.last; if (!s) return; const ctx = this.ctx; const { width, height } = this.canvas;
+    ctx.save();
+    // bg + grid
+    ctx.fillStyle = this.theme.bg; ctx.fillRect(0,0,width,height);
+    drawGrid(ctx, this.cam, width, height, this.theme.grid);
+
+    // edges
+    ctx.lineWidth = 1; ctx.font = this.font;
+    for (const id in s.monads) {
+      const m = s.monads[id]; const nb = m.neighbors || [];
+      for (const t of nb) {
+        const B = s.monads[t]; if (!B) continue;
+        const a = worldToScreen(m, this.cam), b = worldToScreen(B, this.cam);
+        ctx.strokeStyle = this.theme.edge; if (this.hotRule && isEdgeHot(s, id, t, this.hotRule)) ctx.strokeStyle = this.theme.edgeHot;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+
+    // nodes
+    for (const id in s.monads) {
+      const m = s.monads[id]; const p = worldToScreen(m, this.cam);
+      ctx.beginPath(); ctx.arc(p.x, p.y, this.nodeRadius*this.cam.z, 0, Math.PI*2);
+      ctx.fillStyle = this.sel===id ? this.theme.nodeSel : this.theme.node; ctx.fill();
+    }
+
+    // labels (light)
+    ctx.fillStyle = this.theme.label; ctx.textAlign='center'; ctx.textBaseline='top';
+    for (const id in s.monads){ const m = s.monads[id]; const p = worldToScreen(m, this.cam); ctx.fillText(id, p.x, p.y + this.nodeRadius*this.cam.z + 2); }
+
+    ctx.restore();
+  }
+}
+
+function worldToScreen(m: MonadView, cam: Camera){ return { x: (m.x||0)*cam.z + cam.x, y: (m.y||0)*cam.z + cam.y } }
+function drawGrid(ctx: CanvasRenderingContext2D, cam: Camera, w: number, h: number, color: string){
+  const step = Math.max(16, 64 * cam.z|0);
+  ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x=((cam.x%step)+step)%step; x<=w; x+=step){ ctx.moveTo(x,0); ctx.lineTo(x,h); }
+  for (let y=((cam.y%step)+step)%step; y<=h; y+=step){ ctx.moveTo(0,y); ctx.lineTo(w,y); }
+  ctx.stroke();
+}
+function isEdgeHot(s: SnapshotSlim, a: string, b: string, ruleId: string){
+  // heuristic: if last tick includes rule with source→target
+  return (s.rulesFired||[]).some(r => r.ruleId===ruleId && ((r.sourceId===a && r.targetId===b) || (r.sourceId===b && r.targetId===a)));
+}
+```
+
+---
+
+## 6) `playground/components/GraphCanvas.tsx` (new)
+
+```tsx
+// playground/components/GraphCanvas.tsx
+// Stage 4A — React wrapper for CanvasGraph with pan/zoom/selection
+
+import React, { useEffect, useRef, useState } from 'react';
+import { CanvasGraph } from '../../engine/renderer/canvas/CanvasGraph';
+import { SnapshotSlim } from '../../engine/core/perf/timelineDelta';
+
+export const GraphCanvas: React.FC<{ snapshot: SnapshotSlim | null; hotRule?: string | null; onPick?: (id: string|null) => void }>
+= ({ snapshot, hotRule=null, onPick }) => {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const graphRef = useRef<CanvasGraph | null>(null);
+  const [size, setSize] = useState({ w: 800, h: 480 });
+
+  useEffect(() => {
+    const c = ref.current!; const g = new CanvasGraph(c); graphRef.current = g; const ro = new ResizeObserver(() => { const r = c.getBoundingClientRect(); setSize({ w: r.width|0, h: r.height|0 }); g.resize(r.width|0, r.height|0); g.draw(); }); ro.observe(c.parentElement!);
+    return () => { ro.disconnect(); };
+  }, []);
+
+  useEffect(() => { const g = graphRef.current; if (!g) return; g.setSnapshot(snapshot || undefined as any); g.setHotRule(hotRule || null); g.draw(); }, [snapshot?.tick, hotRule]);
+
+  // mouse interactions
+  useEffect(() => { const c = ref.current!; const g = graphRef.current!; let dragging=false; let lastX=0,lastY=0;
+    const md = (e: MouseEvent) => { dragging=true; lastX=e.clientX; lastY=e.clientY; pick(e); };
+    const mm = (e: MouseEvent) => { if (!dragging) return; const dx=e.clientX-lastX, dy=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; g.setCamera({ x: g.cam.x+dx, y: g.cam.y+dy }); g.draw(); };
+    const mu = () => { dragging=false; };
+    const wheel = (e: WheelEvent) => { e.preventDefault(); const z = Math.max(0.25, Math.min(4, g.cam.z * (e.deltaY<0?1.1:0.9))); g.setCamera({ z }); g.draw(); };
+    function pick(e: MouseEvent){ if (!snapshot) return; const rect = c.getBoundingClientRect(); const x=e.clientX-rect.left, y=e.clientY-rect.top; const hit = hitTest(snapshot, g, x, y); g.setSelection(hit); g.draw(); onPick?.(hit); }
+    c.addEventListener('mousedown', md); window.addEventListener('mousemove', mm); window.addEventListener('mouseup', mu); c.addEventListener('wheel', wheel, { passive:false });
+    return () => { c.removeEventListener('mousedown', md); window.removeEventListener('mousemove', mm); window.removeEventListener('mouseup', mu); c.removeEventListener('wheel', wheel); };
+  }, [snapshot?.tick]);
+
+  return <canvas ref={ref} style={{ width:'100%', height: 480, display:'block', border:'1px solid #e5e7eb', borderRadius: 10 }} />;
+};
+
+function hitTest(s: SnapshotSlim, g: CanvasGraph, x: number, y: number): string | null {
+  const r = g.nodeRadius * g.cam.z + 2; const r2 = r*r;
+  for (const id in s.monads){ const m = s.monads[id]; const p = { x: (m.x||0)*g.cam.z + g.cam.x, y: (m.y||0)*g.cam.z + g.cam.y }; const dx=p.x-x, dy=p.y-y; if (dx*dx+dy*dy <= r2) return id; }
+  return null;
+}
+```
+
+---
+
+## 7) `engine/renderer/layout/seededLayout.ts` (new)
+
+```ts
+// engine/renderer/layout/seededLayout.ts
+// Stage 4A — Deterministic positions when snapshots lack x/y
+
+import type { SnapshotSlim } from '../../core/perf/timelineDelta';
+
+export function ensurePositions(s: SnapshotSlim): SnapshotSlim {
+  const ids = Object.keys(s.monads);
+  const n = Math.max(1, ids.length); const radius = 120 + Math.sqrt(n)*12;
+  ids.sort();
+  ids.forEach((id, i) => {
+    const m = s.monads[id]; if (typeof m.x==='number' && typeof m.y==='number') return;
+    const t = (i / n) * Math.PI * 2;
+    m.x = Math.cos(t) * radius; m.y = Math.sin(t) * radius;
+  });
+  return s;
+}
+```
+
+---
+
+## 8) `playground/components/CanvasPanel.tsx` (new) — wire layout + GraphCanvas
+
+```tsx
+// playground/components/CanvasPanel.tsx
+// Stage 4A — Drop-in panel for the new Canvas renderer
+
+import React from 'react';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { GraphCanvas } from './GraphCanvas';
+
+export const CanvasPanel: React.FC<{ timeline: ExecutionSnapshot[]; index: number; hotRule?: string|null }>
+= ({ timeline, index, hotRule=null }) => {
+  const snap = React.useMemo(() => {
+    const s = toSlim(timeline[Math.max(0, Math.min(index, timeline.length-1))] || { tick: index, monads: [], rulesFired: [] } as any);
+    return ensurePositions(s);
+  }, [index, timeline]);
+
+  const [picked, setPicked] = React.useState<string|null>(null);
+
+  return (
+    <div className="mpl-canvas">
+      <GraphCanvas snapshot={snap} hotRule={hotRule} onPick={setPicked} />
+      <div className="mpl-small mpl-dim">Tick {snap.tick} • {Object.keys(snap.monads).length} monads • Picked: {picked ?? '—'}</div>
+    </div>
+  );
+};
+```
+
+---
+
+## 9) `playground/components/DebuggerPanel.tsx` (augment) — add Canvas section + Bench
+
+```tsx
+// playground/components/DebuggerPanel.tsx — Stage 4A diffs
+// Assumes existing state: timeline, idx, setIdx, etc. from prior stages.
+
+import { CanvasPanel } from './CanvasPanel';
+import { benchTimeline } from '../../engine/bench/bench';
+
+// inside component body, add a perf quickcheck derived from current timeline
+const perfInfo = React.useMemo(() => benchTimeline(timeline), [timeline]);
+
+// ...in JSX...
+<section className="mpl-section">
+  <header className="mpl-section-h">Canvas Renderer</header>
+  <CanvasPanel timeline={timeline as any} index={idx} />
+</section>
+
+<section className="mpl-section">
+  <header className="mpl-section-h">Engine Perf (apply Δ)</header>
+  <table className="mpl-table"><thead><tr><th>Benchmark</th><th>Iters</th><th>Time (ms)</th><th>ns/op</th></tr></thead><tbody>
+    {perfInfo.map(r => <tr key={r.name}><td>{r.name}</td><td>{r.iters}</td><td>{r.ms.toFixed(2)}</td><td>{r.nsPerOp}</td></tr>)}
+  </tbody></table>
+</section>
+```
+
+---
+
+## 10) `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4A — Canvas + perf table */
+.mpl-canvas { display: grid; gap: 6px; }
+```
+
+---
+
+## 11) Example — `playground/pages/DebugExample4A.tsx`
+
+```tsx
+// playground/pages/DebugExample4A.tsx
+import React, { useMemo } from "react";
+import { DebuggerPanel } from "../components/DebuggerPanel";
+import { ExecutionSnapshot } from "../../engine/debugger/graphTypes";
+
+export default function DebugExample4A() {
+  const history: ExecutionSnapshot[] = useMemo(() => [
+    { tick: 0, monads: [ { id: "A", neighbors: ["B"], x: -80, y: 0 }, { id: "B", neighbors: ["A"], x: 80, y: 0 } ], rulesFired: [ { ruleId: "R1", at: 0, monadId: "A", sourceId: "A", targetId: "B" } ] },
+    { tick: 1, monads: [ { id: "A", neighbors: ["B","C"], x: -100, y: -20 }, { id: "B", neighbors: ["A","C"], x: 100, y: -20 }, { id: "C", neighbors: ["A","B"], x: 0, y: 110 } ], rulesFired: [ { ruleId: "R2", at: 1, monadId: "B", sourceId: "B", targetId: "C" } ] },
+    { tick: 2, monads: [ { id: "A", neighbors: ["C"], x: -60, y: 0 }, { id: "C", neighbors: ["A"], x: 60, y: 0 } ], rulesFired: [ { ruleId: "R3", at: 2, monadId: "C" } ] },
+  ], []);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4A — Engine Perf + Canvas Renderer</h1>
+      <DebuggerPanel history={history} />
+    </div>
+  );
+}
+```
+
+---
+
+## 12) Notes & Next Steps
+
+* **Delta timeline**: The `DeltaPatch` format assumes edges are implicit via `neighbors`. If you add explicit edge records, extend `add/remove.update.edges` accordingly.
+* **Renderer perf**: For large graphs (>5k nodes), consider batching edges by screen‑space tiles and switching to WebGL or `OffscreenCanvas`.
+* **Layouts**: `seededLayout` is a simple radial fallback. A “sticky” force layout can be added later as 4B.
+* **Animation**: Interpolated transitions between ticks can be added by lerping node positions in `CanvasGraph` (4C idea).
+* **Benchmarks**: The microbench is meant for sanity checks. For rigorous profiling, instrument with the browser profiler.
+
+---
+
+## 13) Changelog — Stage 4A
+
+* New engine perf: `timelineDelta.ts`, `indexes.ts`, `arena.ts`, `bench.ts`
+* New renderer: `CanvasGraph.ts`, `seededLayout.ts`
+* New UI: `GraphCanvas.tsx`, `CanvasPanel.tsx`
+* Debugger wiring: Canvas section + apply‑delta perf table
+* CSS: minor additions
+
+```
+```

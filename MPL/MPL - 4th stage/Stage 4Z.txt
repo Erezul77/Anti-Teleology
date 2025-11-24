@@ -1,0 +1,423 @@
+# MPL Playground — Stage 4Z Patch (Packaging, Release Checklist & Demo Scripts)
+
+Wrap‑up patch to ship MPL Playground. It standardizes **packaging**, adds a **release checklist**, **CI/CD**, and **demo scripts** (live & recorded). Includes templates (release notes, issue/PR), sample data, and a minimal Docker image.
+
+Builds on 4C–4Y. No runtime external deps; dev tooling uses Vite + TypeScript.
+
+---
+
+## 0) Repo layout (final)
+
+```
+/engine                 # core rendering, ingest, plugins, db bridge, collab, perf
+/playground             # React UI, panels, pages, styles, examples
+/scripts                # demo scripts, smoke tests, helpers
+/.github                # CI workflows & templates
+/packages/cli (opt)     # minimal local dev server and share‑pack utilities
+/assets                 # logos, screenshots, sample packs/data
+```
+
+---
+
+## 1) Build & packaging
+
+### 1.1 Engine package (`engine/package.json`)
+
+```json
+{
+  "name": "@mpl/engine",
+  "version": "0.9.0",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/make-cjs.cjs",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "license": "MIT"
+}
+```
+
+> `scripts/make-cjs.cjs` rewrites ESM to CJS for `dist/index.cjs` via a tiny transform (keeps no deps policy).
+
+`engine/tsconfig.build.json`:
+
+```json
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "module": "ES2020",
+    "target": "ES2020",
+    "moduleResolution": "Bundler",
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+```
+
+### 1.2 Playground app (`playground/package.json`)
+
+```json
+{
+  "name": "mpl-playground",
+  "private": true,
+  "version": "0.9.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "analyze": "vite build --mode analyze"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@mpl/engine": "^0.9.0"
+  },
+  "devDependencies": { "typescript": "^5.4.0", "vite": "^5.0.0" }
+}
+```
+
+`playground/vite.config.ts`:
+
+```ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+export default defineConfig({ plugins: [react()], base: './', build: { sourcemap: true, outDir: 'dist' } });
+```
+
+> The app builds to a static site under `playground/dist` (drop into any CDN or `{ static }` host).
+
+### 1.3 Optional CLI (`packages/cli`)
+
+A tiny Node CLI for:
+
+* `serve` — static preview with proper headers
+* `pack` — create/import `.mpack(.gz)` (4T) from stdin/stdout
+
+`scripts/cli.js` (excerpt):
+
+```js
+#!/usr/bin/env node
+import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path';
+const cmd = process.argv[2];
+if (cmd === 'serve') { const dir = process.argv[3] || 'playground/dist';
+  const srv = http.createServer((req,res)=>{ let f=path.join(dir, req.url==='/'?'index.html':req.url); if(!fs.existsSync(f)){ f=path.join(dir,'index.html'); }
+    fs.createReadStream(f).pipe(res); }); srv.listen(8080, ()=>console.log('Serving http://localhost:8080')); }
+else { console.log('mpl-cli: try `serve`'); }
+```
+
+---
+
+## 2) CI/CD (GitHub Actions)
+
+### 2.1 `ci.yml` — build, lint, golden tests, smoke
+
+```yaml
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm -w engine ci && npm -w playground ci
+      - run: npm -w engine run build
+      - run: npm -w playground run build
+      - name: Golden tests (4S)
+        run: node scripts/golden-test.cjs
+      - name: Smoke (open pages headless)
+        run: node scripts/smoke.cjs
+      - uses: actions/upload-artifact@v4
+        with: { name: site, path: playground/dist }
+```
+
+### 2.2 `release.yml` — tag → publish & pages
+
+```yaml
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: 'https://registry.npmjs.org' }
+      - run: npm -w engine ci && npm -w engine run build
+      - run: npm -w engine publish --access public
+        env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} }
+      - run: npm -w playground ci && npm -w playground run build
+      - name: Deploy Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with: { github_token: ${{ secrets.GITHUB_TOKEN }}, publish_dir: playground/dist }
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with: { generate_release_notes: true }
+```
+
+---
+
+## 3) Release checklist (operator)
+
+### Before code freeze
+
+* [ ] All 4X perf budgets green on target hardware (60fps aim, 30fps min)
+* [ ] 4Y a11y pass: keyboard traversal, focus visible, screen‑reader summary reads
+* [ ] 4U plugin sandbox: Halo + Cycle Finder samples run; network permission off by default
+* [ ] 4T export: PNG/SVG/PDF work with/without transparency; Share Pack export/import round‑trip
+* [ ] 4W DB bridge: Cypher/Gremlin/GQL adapters run sample queries; mapping to edges works
+* [ ] 4V collab: two tabs show presence, comments sync, review state toggles
+* [ ] 4S snapshot diffing: golden baseline updated and clean
+* [ ] No console errors in `playground` pages
+
+### During release
+
+* [ ] Bump versions (`engine` + `playground`), commit `chore: release vX.Y.Z`
+* [ ] Tag `vX.Y.Z` and push; CI publishes + deploys
+* [ ] Draft Release Notes from template (below), attach **Share Pack** and screenshots
+
+### After release
+
+* [ ] Update README quickstart with CDN/Pages URL
+* [ ] Cut a **demo video** (script in §5) and link in release
+* [ ] Open `vNext` milestone with scoped issues (known limitations)
+
+---
+
+## 4) Templates
+
+### 4.1 Release Notes (Markdown)
+
+```md
+# MPL Playground vX.Y.Z — Title
+
+## Highlights
+- …
+
+## Changes
+- feat: …
+- fix: …
+
+## Breaking
+- …
+
+## Known issues
+- …
+
+## Assets
+- Share Pack: <attached>
+- Demo video: <link>
+```
+
+### 4.2 Issue templates
+
+`.github/ISSUE_TEMPLATE/bug.md`
+
+```md
+---
+name: Bug report
+about: Something broke
+---
+**What happened?**
+**Steps to reproduce**
+**Expected**
+**Screenshots / packs** (attach .mpack if possible)
+**Env** (browser, OS, GPU)
+```
+
+`.github/ISSUE_TEMPLATE/feature.md`
+
+```md
+---
+name: Feature request
+about: Suggest an idea
+---
+**Problem**
+**Proposal**
+**Alternatives**
+**Who benefits**
+```
+
+### 4.3 PR template
+
+`.github/pull_request_template.md`
+
+```md
+## Summary
+- …
+
+## Checklists
+- [ ] CI green (build, golden, smoke)
+- [ ] A11y (tab/focus) unaffected
+- [ ] Perf regression checked (HUD p95)
+- [ ] Docs updated (if user‑visible)
+```
+
+---
+
+## 5) Demo scripts (10–12 min live, 3 min short)
+
+### 5.1 Live demo (10–12 min)
+
+1. **Hello + layout** (1:30)
+
+   * Load `DebugExample4X`; pan/zoom; show HUD adapting (edge cap/labels).
+2. **Export & Packs** (1:00)
+
+   * `ExportPanel`: PNG @2× + PDF; `PackPanel`: export and re‑import.
+3. **Plugins** (2:00)
+
+   * Open Plugins; paste Halo sample; enable; tweak threshold; show overlays & metrics.
+4. **DB Bridge** (2:30)
+
+   * Connect to gateway; run Cypher: `MATCH (a)-[r]->(b) RETURN id(a) AS a, id(b) AS b LIMIT 200`; map to edges; **Send to Canvas**.
+5. **Collab** (2:00)
+
+   * Open second tab; connect room; ghost cursors + comment thread; resolve.
+6. **A11y & Themes** (1:00)
+
+   * Switch to High Contrast; use arrow keys; screen reader summary (read count).
+7. **Wrap** (0:30)
+
+   * Mention perf autotuner and plugin API; point to docs.
+
+### 5.2 Short teaser (≤3 min)
+
+* Pre‑scripted clicks + key moments (export, plugin halo, live query, collab cursors, theme switch).
+
+> **Tip:** Prepare a Share Pack that encodes annotations showing each step.
+
+---
+
+## 6) Smoke & golden tests (scripts)
+
+`scripts/golden-test.cjs` (excerpt):
+
+```js
+// Compares JSON golden baselines produced in 4S with current snapshot diffs
+import fs from 'node:fs';
+const base = JSON.parse(fs.readFileSync('assets/baselines/golden.json','utf8'));
+const now = JSON.parse(fs.readFileSync('assets/baselines/current.json','utf8'));
+if (JSON.stringify(base) !== JSON.stringify(now)) { console.error('Golden mismatch'); process.exit(1); }
+console.log('Golden OK');
+```
+
+`scripts/smoke.cjs` (excerpt):
+
+```js
+import { spawn } from 'node:child_process';
+// Launch vite preview and probe key pages via Playwright-lite fetches
+// (use fetch to confirm 200 + embed simple DOM checks if you add a headless harness)
+```
+
+---
+
+## 7) Docker & static deploy
+
+`Dockerfile` (multi‑stage, tiny)
+
+```dockerfile
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY . .
+RUN npm -w playground ci && npm -w playground run build
+
+FROM nginx:alpine
+COPY --from=build /app/playground/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx","-g","daemon off;"]
+```
+
+> Alternatively, push `playground/dist` to GitHub Pages (see `release.yml`).
+
+---
+
+## 8) Licenses & policies
+
+* License: **MIT** (root `LICENSE` file)
+* Code of Conduct: Contributor Covenant 2.1 (`CODE_OF_CONDUCT.md`)
+* Security: `SECURITY.md` with contact and disclosure window
+
+---
+
+## 9) Known limitations
+
+* Graph DB adapters are gateway‑oriented; direct driver connections are out of scope
+* Worker sandbox forbids DOM; plugins needing UI must request host‑rendered widgets
+* PDF export uses browser Print pipeline; true PDF vector paths are future work
+
+---
+
+## 10) Roadmap (post‑0.9 → 1.0)
+
+* WebGL lines (instanced) for 100k+ edges @60fps
+* Rich plugin UI via host‑rendered components & events
+* CRDT text notes for concurrent editing
+* Native SVG/PDF export with annotations
+* Persisted rooms for collab + auth integration
+
+---
+
+## 11) README (top‑level, condensed)
+
+````md
+# MPL Playground
+
+A lightweight, dependency‑free graph reasoning & visualization playground with exports, plugins, live DB bridge, collab, perf autotuning, and accessibility.
+
+## Quickstart
+```bash
+pnpm -w playground dev
+# or npm -w playground run dev
+````
+
+Open [http://localhost:5173](http://localhost:5173) and explore the DebugExample pages.
+
+## Build
+
+```bash
+npm -w playground run build
+```
+
+Outputs static site in `playground/dist`.
+
+## Engine package
+
+```bash
+npm -w engine run build && npm -w engine publish --access public
+```
+
+```
+
+---
+
+## 12) Changelog — Stage 4Z
+- New: Engine & playground packaging configs (TS/Vite)
+- New: CI/CD workflows (`ci.yml`, `release.yml`)
+- New: Templates (release notes, issue/PR)
+- New: Demo scripts (live + short), smoke/golden helpers
+- New: Dockerfile for static deploy
+- Docs: Repo layout, roadmap, known limitations
+
+```

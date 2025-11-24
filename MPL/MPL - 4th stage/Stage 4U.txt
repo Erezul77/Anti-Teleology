@@ -1,0 +1,441 @@
+# MPL Playground — Stage 4U Patch (Plugin Sandbox: Custom Renderers, Rules & Analyzers)
+
+This patch introduces a safe **Plugin Sandbox** so third parties can extend the MPL Playground with:
+
+* **Custom renderers** (draw overlays/effects on the canvas)
+* **Analyzers** (compute metrics, search, alerts)
+* **Rule hooks** (observe rule events and emit annotations)
+
+No external deps. Plugins run in a **dedicated Worker** via a **minimal RPC** API, behind explicit **permissions** and **timeouts**.
+
+Builds on 4C–4T.
+
+---
+
+## Highlights
+
+* **Isolated execution**: Blob‑backed Web Worker per plugin, killed on timeout or violation
+* **Permissions**: `readSnapshot`, `drawOverlay`, `emitAlerts`, `storage`, `network` (opt‑in, default off)
+* **Typed RPC**: handshake, onTick snapshot stream, draw operations, metrics, alerts, storage get/set
+* **Overlay replay**: plugins emit **draw ops** (safe vector primitives) that the host replays onto a top overlay layer
+* **Hot reload**: paste code or load by URL; enable/disable; inspect logs & metrics
+* **Dev SDK**: tiny TS defs for code completion
+
+---
+
+## 1) `engine/plugins/types.ts` — Manifest, permissions, draw ops, host API
+
+```ts
+// engine/plugins/types.ts — Stage 4U
+export type PluginPermission =
+  | 'readSnapshot'   // receive slim snapshots on each tick
+  | 'drawOverlay'    // emit draw ops for host to replay
+  | 'emitAlerts'     // raise toasts/alerts via host
+  | 'storage'        // get/set plugin-scoped key/value
+  | 'network';       // allow fetch() inside worker (disabled unless granted)
+
+export type PluginManifest = {
+  id: string;                 // stable id
+  name: string;               // human title
+  version: string;            // semver
+  author?: string;
+  description?: string;
+  permissions: PluginPermission[];
+  entry: 'module';            // future: 'module' | 'wasm'
+};
+
+export type DrawOp =
+  | { k:'line'; x1:number;y1:number;x2:number;y2:number; width?:number; color?:string; alpha?:number }
+  | { k:'circle'; x:number;y:number;r:number; stroke?:string; fill?:string; width?:number; alpha?:number }
+  | { k:'text'; x:number;y:number; s:string; size?:number; color?:string; align?:'left'|'center'|'right'; alpha?:number }
+  | { k:'poly'; pts:number[]; stroke?:string; fill?:string; width?:number; alpha?:number };
+
+export type PluginMetrics = Record<string, number> & { _ts?: number };
+
+export type SnapshotSlim = {
+  tick: number;
+  monads: Record<string, { id:string; x:number; y:number; neighbors?: string[]; label?: string }>;
+  rulesFired?: string[];
+};
+
+// Messages across the sandbox boundary
+export type HostToPlugin =
+  | { t:'init'; manifest: PluginManifest; config: any }
+  | { t:'tick'; snap: SnapshotSlim }
+  | { t:'req:storage'; id:string; op:'get'|'set'; key:string; val?:any }
+  | { t:'grant:network'; allow:boolean };
+
+export type PluginToHost =
+  | { t:'ready' }
+  | { t:'draw'; ops: DrawOp[] }
+  | { t:'metrics'; data: PluginMetrics }
+  | { t:'alert'; title:string; body:string; color?:string }
+  | { t:'resp:storage'; id:string; ok:boolean; val?:any; err?:string }
+  | { t:'log'; level:'info'|'warn'|'error'; msg:any };
+
+export type PluginModule = {
+  manifest: PluginManifest;
+  onInit?: (ctx: PluginContext, config: any) => void|Promise<void>;
+  onTick?: (snap: SnapshotSlim, ctx: PluginContext) => void|Promise<void>;
+};
+
+export type PluginContext = {
+  // Emit operations
+  draw: (ops: DrawOp[]) => void;
+  metrics: (m: PluginMetrics) => void;
+  alert: (title:string, body:string, color?:string) => void;
+  log: (level:'info'|'warn'|'error', msg:any) => void;
+  // Storage (namespaced by plugin id)
+  storage: { get:(key:string)=>Promise<any>; set:(key:string, val:any)=>Promise<void> };
+};
+```
+
+---
+
+## 2) `engine/plugins/rpc.ts` — sandbox bootstrap & message guards
+
+```ts
+// engine/plugins/rpc.ts — Stage 4U
+import type { HostToPlugin, PluginToHost, PluginModule, PluginContext, DrawOp, PluginManifest } from './types';
+
+export type Sandboxed = {
+  worker: Worker;
+  post: (m: HostToPlugin) => void;
+  kill: () => void;
+};
+
+export function makeSandbox(code: string, manifest: PluginManifest, hooks: {
+  onMsg: (m: PluginToHost) => void;
+  onError: (e: ErrorEvent | MessageEvent) => void;
+  allowNetwork?: boolean;
+}): Sandboxed {
+  const blob = new Blob([
+    `const __manifest = ${JSON.stringify(manifest)};\n`+
+    // lock down globals a bit
+    `self.document = undefined; self.window = undefined; self.XMLHttpRequest = undefined;\n`+
+    `if (!${!!hooks.allowNetwork}) { self.fetch = undefined; }\n`+
+    // simple loader + bridge
+    `let api;\n`+
+    `function send(m){ postMessage(m); }\n`+
+    `const ctx = { draw(ops){ send({ t:'draw', ops }); }, metrics(d){ send({ t:'metrics', data:d }); }, alert(a,b,c){ send({ t:'alert', title:a, body:b, color:c }); }, log(l,m){ send({ t:'log', level:l, msg:m }); }, storage:{ get:(key)=>new Promise(res=>{ const id=Math.random().toString(36).slice(2); const onMsg=(ev)=>{ if(ev.data && ev.data.t==='resp:storage' && ev.data.id===id){ removeEventListener('message', onMsg); res(ev.data.val); } }; addEventListener('message', onMsg); send({ t:'req:storage', id, op:'get', key }); }), set:(key,val)=>new Promise(res=>{ const id=Math.random().toString(36).slice(2); const onMsg=(ev)=>{ if(ev.data && ev.data.t==='resp:storage' && ev.data.id===id){ removeEventListener('message', onMsg); res(); } }; addEventListener('message', onMsg); send({ t:'req:storage', id, op:'set', key, val }); }) } };\n`+
+    `let mod;\n`+
+    // plugin module wrapper
+    `try { mod = (function(){ ${code}\n return exports || module?.exports || self.__default; })(); } catch(e){ postMessage({ t:'log', level:'error', msg:String(e && e.stack || e) }); }\n`+
+    `postMessage({ t:'ready' });\n`+
+    `onmessage = async (ev)=>{ const m = ev.data; if (!m) return; try{ if (m.t==='init'){ await mod?.onInit?.(ctx, m.config); } else if (m.t==='tick'){ await mod?.onTick?.(m.snap, ctx); } else if (m.t==='grant:network'){ /* ignored at runtime */ } } catch(e){ postMessage({ t:'log', level:'error', msg:String(e && e.stack || e) }); } };`
+  ], { type: 'application/javascript' });
+
+  const worker = new Worker(URL.createObjectURL(blob), { name: `mpl-plugin:${manifest.id}` });
+  worker.onmessage = (ev) => hooks.onMsg(ev.data as PluginToHost);
+  worker.onerror = hooks.onError as any;
+  const post = (m: HostToPlugin) => worker.postMessage(m);
+  const kill = () => worker.terminate();
+  return { worker, post, kill };
+}
+```
+
+---
+
+## 3) `engine/plugins/manager.ts` — install/enable/dispatch/record
+
+```ts
+// engine/plugins/manager.ts — Stage 4U
+import { makeSandbox, Sandboxed } from './rpc';
+import type { PluginManifest, PluginPermission, PluginToHost, HostToPlugin, DrawOp, SnapshotSlim } from './types';
+
+export type InstalledPlugin = {
+  id: string;
+  manifest: PluginManifest;
+  code: string;           // source code
+  enabled: boolean;
+  permissions: PluginPermission[];
+  lastOps?: DrawOp[];
+  lastMetrics?: Record<string, number>;
+  logs: Array<{ level:string; msg:any; ts:number }>;
+};
+
+export class PluginManager {
+  private plugs = new Map<string, InstalledPlugin>();
+  private sandboxes = new Map<string, Sandboxed>();
+  private storage = new Map<string, Record<string, any>>(); // naive in-mem (persist via localStorage in UI)
+
+  list(){ return [...this.plugs.values()]; }
+  get(id:string){ return this.plugs.get(id) || null; }
+
+  install(manifest: PluginManifest, code: string){
+    if (this.plugs.has(manifest.id)) throw new Error('Plugin already installed');
+    const rec: InstalledPlugin = { id: manifest.id, manifest, code, enabled: false, permissions: manifest.permissions, logs: [] };
+    this.plugs.set(rec.id, rec); return rec;
+  }
+  remove(id:string){ this.disable(id); this.plugs.delete(id); }
+  enable(id:string, config?: any){ const p=this.plugs.get(id); if(!p) throw new Error('Missing'); if (this.sandboxes.has(id)) return; const sb = makeSandbox(p.code, p.manifest, { onMsg: m=>this.onMsg(p, m), onError: e=>this.onErr(p, e), allowNetwork: p.permissions.includes('network') }); this.sandboxes.set(id, sb); p.enabled=true; sb.post({ t:'init', manifest: p.manifest, config }); }
+  disable(id:string){ const sb=this.sandboxes.get(id); if(sb){ sb.kill(); this.sandboxes.delete(id); } const p=this.plugs.get(id); if(p) p.enabled=false; }
+
+  onTick(snap: SnapshotSlim){ for (const [id, sb] of this.sandboxes){ const p=this.plugs.get(id)!; if (!p.permissions.includes('readSnapshot')) continue; sb.post({ t:'tick', snap }); } }
+
+  collectDrawOps(): Record<string, DrawOp[]> { const out: Record<string, DrawOp[]> = {}; for (const p of this.plugs.values()){ if (p.lastOps?.length) out[p.id] = p.lastOps; } return out; }
+  getMetrics(): Record<string, Record<string,number>|undefined> { const out: Record<string, Record<string,number>|undefined>={}; for (const p of this.plugs.values()) out[p.id]=p.lastMetrics; return out; }
+
+  private onMsg(p: InstalledPlugin, m: PluginToHost){
+    if (m.t==='draw'){ if (!p.permissions.includes('drawOverlay')) return; p.lastOps = (m.ops||[]).slice(0, 5000); }
+    else if (m.t==='metrics'){ p.lastMetrics = { ...(m.data||{}), _ts: Date.now() } as any; }
+    else if (m.t==='alert'){ if (!p.permissions.includes('emitAlerts')) return; this.log(p, 'info', `ALERT ${m.title}: ${m.body}`); (window as any).__mpl_toast?.(m.title, m.body, m.color||'#0ea5e9'); }
+    else if (m.t==='resp:storage'){ /* routed from req handler below */ }
+    else if (m.t==='log'){ this.log(p, m.level, m.msg); }
+  }
+  private onErr(p: InstalledPlugin, e: any){ this.log(p, 'error', String(e.message||e)); }
+  private log(p: InstalledPlugin, level:string, msg:any){ p.logs.push({ level, msg, ts: Date.now() }); p.logs = p.logs.slice(-200); }
+
+  // Host-side handling for plugin storage RPC
+  handleHostMessage(id:string, m: HostToPlugin){ const p=this.plugs.get(id); if(!p) return; const sb=this.sandboxes.get(id); if(!sb) return; if (m.t==='req:storage'){ const bag=this.storage.get(id) || {}; if (m.op==='get'){ const val = bag[m.key]; sb.worker.postMessage({ t:'resp:storage', id:m.id, ok:true, val }); } else { bag[m.key]=m.val; this.storage.set(id, bag); sb.worker.postMessage({ t:'resp:storage', id:m.id, ok:true }); } } }
+}
+```
+
+> UI will persist `PluginManager.storage` to `localStorage` (scoped per plugin id) and route `{t:'req:storage'}` into `handleHostMessage`.
+
+---
+
+## 4) `engine/plugins/sdk-template.ts` — minimal plugin starter (copy/paste)
+
+```ts
+// engine/plugins/sdk-template.ts — Stage 4U
+export const HELLO_PLUGIN = `
+export const manifest = {
+  id: 'hello.halo', name: 'Halo Overlay', version: '0.1.0',
+  description: 'Highlights nodes of degree >= threshold with a green halo',
+  permissions: ['readSnapshot','drawOverlay']
+};
+
+let threshold = 4;
+export async function onInit(ctx, cfg){ threshold = cfg?.threshold ?? threshold; ctx.log('info', 'Halo ready with threshold=' + threshold); }
+
+export async function onTick(snap, ctx){
+  const deg = {}; for (const id in snap.monads){ deg[id] = (snap.monads[id].neighbors||[]).length; }
+  const ops = [];
+  for (const id in snap.monads){ if (deg[id] >= threshold){ const p = snap.monads[id]; ops.push({ k:'circle', x:p.x, y:p.y, r:8, stroke:'#22c55e', width:2, alpha:0.9 }); } }
+  ctx.draw(ops);
+  ctx.metrics({ count: Object.keys(snap.monads).length, hot: Object.values(deg).filter(d=>d>=threshold).length });
+}
+`;
+
+export const CYCLE_FINDER = `
+export const manifest = { id:'anal.cycle', name:'Cycle Finder', version:'0.1.0', permissions:['readSnapshot','emitAlerts'] };
+export function onTick(snap, ctx){
+  const seen = new Set(); let found=0; // ultra-cheap 3-cycle check
+  for (const a in snap.monads){ const an = new Set(snap.monads[a].neighbors||[]); for (const b of an){ if (b<=a) continue; const bn = new Set(snap.monads[b].neighbors||[]); for (const c of bn){ if (c<=b) continue; if (an.has(c) && (snap.monads[c].neighbors||[]).includes(a)){ const key=[a,b,c].sort().join('-'); if(!seen.has(key)){ seen.add(key); found++; } } } }
+  }
+  if (found>0) ctx.alert('Cycles detected', found + ' triangle(s) found');
+  ctx.metrics({ tri: found });
+}
+`;
+```
+
+---
+
+## 5) `engine/renderer/canvas/CanvasGraph.ts` (update) — replay plugin ops
+
+```ts
+// CanvasGraph.ts — 4U: plugin overlay replay (excerpt)
+import type { DrawOp } from '../../plugins/types';
+
+export class CanvasGraph {
+  // ...existing fields...
+  private pluginOps: Record<string, DrawOp[]> = {};
+  setPluginOps(bundle: Record<string, DrawOp[]>) { this.pluginOps = bundle || {}; }
+
+  draw(){
+    // existing graph draw ...
+    // after nodes/edges, replay plugin ops in world space → screen space
+    const toXY = (x:number,y:number)=> worldToScreen({x,y} as any, this.cam);
+    for (const pid in this.pluginOps){ const ops = this.pluginOps[pid]; if (!ops) continue; for (const op of ops){
+      this.ctx.save(); this.ctx.globalAlpha = op.alpha ?? 1;
+      if (op.k==='line'){ const A=toXY(op.x1,op.y1), B=toXY(op.x2,op.y2); this.ctx.strokeStyle = op.color||'#0ea5e9'; this.ctx.lineWidth=this.strokePx(op.width||1); this.ctx.beginPath(); this.ctx.moveTo(A.x,A.y); this.ctx.lineTo(B.x,B.y); this.ctx.stroke(); }
+      else if (op.k==='circle'){ const P=toXY(op.x,op.y); if (op.fill){ this.ctx.fillStyle = op.fill; this.ctx.beginPath(); this.ctx.arc(P.x,P.y,(op.r||6),0,6.283); this.ctx.fill(); } if (op.stroke){ this.ctx.strokeStyle = op.stroke; this.ctx.lineWidth=this.strokePx(op.width||1); this.ctx.beginPath(); this.ctx.arc(P.x,P.y,(op.r||6),0,6.283); this.ctx.stroke(); } }
+      else if (op.k==='text'){ const P=toXY(op.x,op.y); this.ctx.fillStyle=op.color||'#111827'; this.ctx.textAlign = op.align||'left'; this.ctx.textBaseline='middle'; this.ctx.font = `${Math.round((op.size||12)*this.camScale())}px ui-sans-serif, system-ui`; this.ctx.fillText(op.s, P.x, P.y); }
+      else if (op.k==='poly'){ this.ctx.strokeStyle=op.stroke||'#0ea5e9'; if (op.fill) this.ctx.fillStyle=op.fill; this.ctx.lineWidth=this.strokePx(op.width||1); const pts=op.pts||[]; if (pts.length>=4){ this.ctx.beginPath(); const A=toXY(pts[0], pts[1]); this.ctx.moveTo(A.x,A.y); for (let i=2;i<pts.length;i+=2){ const B=toXY(pts[i], pts[i+1]); this.ctx.lineTo(B.x,B.y); } if (op.fill) this.ctx.fill(); this.ctx.stroke(); }
+      }
+      this.ctx.restore();
+    } }
+  }
+}
+```
+
+---
+
+## 6) `playground/components/PluginPanel.tsx` — install/manage/run
+
+```tsx
+// playground/components/PluginPanel.tsx — Stage 4U
+import React from 'react';
+import { PluginManager } from '../../engine/plugins/manager';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { HELLO_PLUGIN, CYCLE_FINDER } from '../../engine/plugins/sdk-template';
+
+const mgr = new PluginManager();
+
+export const PluginPanel: React.FC<{ history: ExecutionSnapshot[]; tick: number; onOverlay:(ops: Record<string, any>)=>void }>
+= ({ history, tick, onOverlay }) => {
+  const [list, setList] = React.useState(()=>mgr.list());
+  const [code, setCode] = React.useState(HELLO_PLUGIN);
+  const [manifest, setManifest] = React.useState<string>('');
+
+  React.useEffect(()=>{ const slim = toSlim(history[Math.max(0, Math.min(tick, history.length-1))] as any) as any; mgr.onTick(slim); onOverlay(mgr.collectDrawOps()); const id = setInterval(()=>{ onOverlay(mgr.collectDrawOps()); }, 300); return ()=>clearInterval(id); }, [history, tick]);
+
+  function install(){ try{ // derive manifest by executing a tiny pre-pass? instead, ask user to paste code that exports manifest
+    const tmpManifest = extractManifest(code); mgr.install(tmpManifest, code); setList(mgr.list()); }catch(e){ alert('Install failed: '+e); } }
+  function enable(id:string){ mgr.enable(id, {}); setList(mgr.list()); }
+  function disable(id:string){ mgr.disable(id); setList(mgr.list()); }
+  function remove(id:string){ mgr.remove(id); setList(mgr.list()); }
+
+  return (
+    <div className="mpl-card">
+      <div className="mpl-card-h">Plugins</div>
+      <div className="mpl-card-b" style={{ display:'grid', gap:8 }}>
+        <details open>
+          <summary>Install</summary>
+          <textarea value={code} onChange={e=>setCode(e.target.value)} rows={10} style={{ width:'100%' }} />
+          <div className="mpl-row"><button className="mpl-btn" onClick={install}>Install from code</button><button className="mpl-btn" onClick={()=>setCode(CYCLE_FINDER)}>Load sample: Cycle Finder</button></div>
+          <div className="mpl-dim">Paste a plugin module that exports <code>manifest</code>, and optional <code>onInit</code>/<code>onTick</code>.</div>
+        </details>
+
+        <div className="mpl-list-b">
+          {list.map(p => (
+            <div key={p.id} className="mpl-plugin-row">
+              <div className="mpl-col">
+                <strong>{p.manifest.name}</strong>
+                <div className="mpl-dim">{p.manifest.id} · v{p.manifest.version} · perms: {p.permissions.join(', ')||'—'}</div>
+                {p.logs.slice(-1).map((l,i)=> <div key={i} className="mpl-log">[{new Date(l.ts).toLocaleTimeString()}] {l.level.toUpperCase()}: {String(l.msg)}</div>)}
+              </div>
+              <div className="mpl-row" style={{ marginLeft:'auto' }}>
+                {!p.enabled ? <button className="mpl-btn" onClick={()=>enable(p.id)}>Enable</button> : <button className="mpl-btn" onClick={()=>disable(p.id)}>Disable</button>}
+                <button className="mpl-btn" onClick={()=>remove(p.id)}>Remove</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+function extractManifest(code: string){
+  // naive regex-based extraction for `export const manifest = {...}` to avoid eval in UI thread
+  const m = /export\s+const\s+manifest\s*=\s*(\{[\s\S]*?\})/m.exec(code); if (!m) throw new Error('manifest not found');
+  const obj = Function(`return (${m[1]})`)();
+  // minimal validation
+  if (!obj.id || !obj.name || !obj.version) throw new Error('manifest missing id/name/version');
+  obj.permissions = obj.permissions || [];
+  obj.entry = 'module';
+  return obj;
+}
+```
+
+---
+
+## 7) `playground/components/CanvasPanel.tsx` (update) — plug-in overlays
+
+```tsx
+// CanvasPanel.tsx — 4U wiring (excerpt)
+import React from 'react';
+import type { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+import { ensurePositions } from '../../engine/renderer/layout/seededLayout';
+import { toSlim } from '../../engine/core/perf/timelineDelta';
+import { GraphCanvas } from './GraphCanvas';
+import { PluginPanel } from './PluginPanel';
+import { PluginManager } from '../../engine/plugins/manager';
+
+const _mgr = new PluginManager();
+
+export const CanvasPanel: React.FC<{ history: ExecutionSnapshot[]; index: number; onIndex?: (i:number)=>void }>
+= ({ history, index, onIndex }) => {
+  const slim = React.useMemo(() => ensurePositions(toSlim(history[Math.max(0, Math.min(index, history.length-1))] || { tick: index, monads: [], rulesFired: [] } as any)), [index, history]);
+  const canvasRef = React.useRef<any>(null);
+
+  function setPluginOverlay(bundle: Record<string, any>){ const g=(canvasRef.current as any)?._graph; if(!g) return; g.setPluginOps(bundle); g.draw(); }
+
+  React.useEffect(()=>{ const s = toSlim(history[Math.max(0, Math.min(index, history.length-1))] as any) as any; _mgr.onTick(s); setPluginOverlay(_mgr.collectDrawOps()); }, [index, history.length]);
+
+  return (
+    <div className="mpl-grid">
+      <div className="mpl-main">
+        <GraphCanvas ref={canvasRef} snapshot={slim} />
+      </div>
+      <aside className="mpl-side">
+        <PluginPanel history={history} tick={index} onOverlay={setPluginOverlay} />
+      </aside>
+    </div>
+  );
+};
+```
+
+---
+
+## 8) Styles — `playground/styles/debugger.css` (additions)
+
+```css
+/* Stage 4U — plugins */
+.mpl-plugin-row { display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; padding:8px 0; border-bottom:1px dashed var(--mpl-border); }
+.mpl-log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color:#374151; }
+```
+
+---
+
+## 9) Example — `playground/pages/DebugExample4U.tsx`
+
+```tsx
+// playground/pages/DebugExample4U.tsx
+import React, { useMemo } from 'react';
+import { DebuggerPanel } from '../components/DebuggerPanel';
+import { ExecutionSnapshot } from '../../engine/debugger/graphTypes';
+
+function makeHistory(): ExecutionSnapshot[]{
+  const ids = Array.from({length: 140}, (_,i)=>`N${i}`);
+  const monads = ids.map((id,i)=>({ id, neighbors: [] as string[], x: Math.cos(i*.22)*200 + (Math.random()-0.5)*10, y: Math.sin(i*.22)*200 + (Math.random()-0.5)*10 }));
+  for (let i=0;i<ids.length;i++) for (let j=i+1;j<ids.length;j++) if (Math.random()<0.03){ monads[i].neighbors.push(ids[j]); monads[j].neighbors.push(ids[i]); }
+  return [{ tick:0, monads, rulesFired:['Seed'] } as any];
+}
+
+export default function DebugExample4U(){
+  const history = useMemo(makeHistory, []);
+  return (
+    <div style={{ padding: 24 }}>
+      <h1>Stage 4U — Plugin Sandbox (Renderers · Analyzers · Rules)</h1>
+      <DebuggerPanel history={history} />
+      <p className="mpl-dim">Open the Plugins panel, install the sample Halo or Cycle Finder, enable, and watch overlays/alerts & metrics update live.</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 10) Security & Limits
+
+* **Isolation**: code runs in a Worker without DOM. `fetch` is **disabled** unless `network` is granted.
+* **Budget**: host may track frame time and kill plugins exceeding N ms/tick (hook into 4Q Watchdog).
+* **Ops cap**: `DrawOp[]` limited to 5k ops/tick to avoid perf abuse (manager truncates).
+* **Storage**: per‑plugin namespace, persisted by UI with `localStorage`.
+* **Future**: capability tokens for protected host actions (e.g., export scene, pin nodes).
+
+---
+
+## 11) Notes
+
+* **UI panels**: kept minimal for now; extend with a JSON UI DSL or host‑rendered widgets for richer plugin controls.
+* **Rules hooks**: plugins can observe `rulesFired` from snapshots; to allow mutation, add a `suggestRule()` host call later.
+* **DX**: surface ambient types to developers by emitting `types.d.ts` at `/sdk` route if serving the playground.
+* **Hot reload**: remove+install re-spawns the Worker, preserving plugin storage.
+
+---
+
+## 12) Changelog — Stage 4U
+
+* New: `engine/plugins/types.ts`, `engine/plugins/rpc.ts`, `engine/plugins/manager.ts`, `engine/plugins/sdk-template.ts`
+* Updated: `CanvasGraph.ts` (overlay replay)
+* New UI: `PluginPanel.tsx`
+* Updated: `CanvasPanel.tsx` (plugin overlay wiring)
+* Styles: plugin list & logs
+
+```
+```

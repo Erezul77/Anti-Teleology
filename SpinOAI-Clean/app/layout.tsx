@@ -26,10 +26,10 @@ export const metadata: Metadata = {
   },
   icons: {
     icon: [
-      { url: '/favicon.gif', sizes: '32x32', type: 'image/gif' }
+      { url: '/favicon.PNG', sizes: '32x32', type: 'image/png' }
     ],
-    shortcut: '/favicon.gif',
-    apple: '/favicon.gif',
+    shortcut: '/favicon.PNG',
+    apple: '/favicon.PNG',
   },
 }
 
@@ -41,10 +41,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <link rel="icon" href="/favicon.gif" type="image/gif" />
-        <link rel="alternate icon" href="/favicon.gif" type="image/gif" />
-        <link rel="shortcut icon" href="/favicon.gif" type="image/gif" />
-        <link rel="apple-touch-icon" href="/favicon.gif" />
+        <link rel="icon" href="/favicon.PNG" type="image/png" />
+        <link rel="alternate icon" href="/favicon.PNG" type="image/png" />
+        <link rel="shortcut icon" href="/favicon.PNG" type="image/png" />
+        <link rel="apple-touch-icon" href="/favicon.PNG" />
         <meta name="theme-color" content="#2c3e50" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta httpEquiv="Cache-Control" content="no-cache, no-store, must-revalidate" />

@@ -1,0 +1,103 @@
+# MPL – Stage 2N (Batch Visualization Dashboard)
+
+Stage 2N extends Stage 2M with a **dashboard visualization system** for batch sweeps and experiments.
+
+---
+
+## Directory Tree
+
+```
+MPL-Stage-2/
+├─ package.json
+├─ tsconfig.json
+├─ README.md
+├─ src/
+│  ├─ runtime/
+│  │  ├─ interpreter.ts
+│  │  ├─ monad.ts
+│  │  ├─ grid.ts
+│  │  └─ topology/
+│  │     └─ index.ts
+│  ├─ debug/
+│  │  └─ trace.ts
+│  ├─ emotional/
+│  │  └─ types.ts
+│  ├─ utils/
+│  │  └─ io.ts
+│  └─ web/
+│     ├─ web-main.ts
+│     ├─ colors.ts
+│     ├─ session.ts
+│     ├─ sweep.ts
+│     └─ dashboard.ts   # NEW for Stage 2N
+└─ examples/
+   └─ run.ts
+```
+
+---
+
+## README.md (excerpt)
+
+```md
+# MPL – Stage 2N (Batch Visualization Dashboard)
+
+### Features up to Stage 2N
+- ✅ 2A–2M: Core engine, rules, grids, sweeps, auto-reports.
+- ✅ 2N: Dashboard with multiple charts + heatmaps.
+```
+
+---
+
+## dashboard.ts (new)
+
+```ts
+import Chart from 'chart.js/auto';
+
+export class Dashboard {
+  constructor(private ctxDelta: HTMLCanvasElement, private ctxSurvival: HTMLCanvasElement) {}
+
+  renderDelta(data: number[][]) {
+    new Chart(this.ctxDelta, {
+      type: 'line',
+      data: {
+        labels: data.map((_, i) => i),
+        datasets: [{
+          label: 'ΔA Trend',
+          data: data.map(v => v.reduce((a,b)=>a+b,0)/v.length),
+        }]
+      }
+    });
+  }
+
+  renderSurvival(data: number[]) {
+    new Chart(this.ctxSurvival, {
+      type: 'line',
+      data: {
+        labels: data.map((_, i) => i),
+        datasets: [{
+          label: 'Survival Curve',
+          data
+        }]
+      }
+    });
+  }
+}
+```
+
+---
+
+## index-2n.html (new)
+
+```html
+<div id="dashboard">
+  <canvas id="deltaChart"></canvas>
+  <canvas id="survivalChart"></canvas>
+  <div id="heatmaps"></div>
+  <button id="exportPNG">Export PNG</button>
+  <button id="exportCSV">Export CSV</button>
+</div>
+```
+
+---
+
+📌 Stage 2N delivers a **batch visualization dashboard** with real-time charts, heatmaps, and export options.

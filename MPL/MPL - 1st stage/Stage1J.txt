@@ -1,0 +1,471 @@
+# MPL — Stage 1J (Full Code Snapshot)
+
+This snapshot focuses on **developer‑experience in the IDE**:
+- **Comments**: language config for `// ...` (already tokenized) + better editor defaults
+- **Code folding**: fold by `{}` blocks (rules, functions, if/else, loops)
+- **Tooltips (hover)**: quick docs for built‑ins (`set, toggle, clear, step, print, len`) and keywords
+- **Core export fix**: add a minimal **linter** in `mpl-core` and **re‑export** `lint` so the web can use it
+
+> Quick start (from repo root):
+> ```bash
+> npm install
+> npm run dev
+> # open http://localhost:5173
+> ```
+
+---
+
+## Root (workspace)
+
+### package.json
+```json
+{
+  "name": "mpl-playground",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["mpl-core", "mpl-web"],
+  "scripts": {
+    "build": "npm -w mpl-core run build && npm -w mpl-web run build",
+    "dev": "npm -w mpl-web run dev",
+    "lint": "npm -w mpl-web run lint"
+  }
+}
+```
+
+### tsconfig.base.json
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
+    "baseUrl": "."
+  }
+}
+```
+
+---
+
+## mpl-core
+
+### package.json
+```json
+{
+  "name": "mpl-core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.4"
+  }
+}
+```
+
+### tsconfig.json
+```json
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "declaration": true,
+    "emitDeclarationOnly": false
+  },
+  "include": ["src"]
+}
+```
+
+### src/types.ts
+```ts
+export type Cell = 0 | 1;
+export interface Grid { width: number; height: number; data: Uint8Array; }
+export interface Diagnostic { message: string; line: number; column: number; severity: "error" | "warning"; }
+export interface VMState { grid: Grid; }
+export interface Program<AST = unknown> { source: string; ast: AST; }
+export interface CompileResult<AST = unknown> { program: Program<AST>; errors: Diagnostic[]; }
+
+// Stage 1J value type (same as 1I)
+export type Value = number | string | Value[] | Map<string, Value>;
+```
+
+### src/vm.ts
+```ts
+import type { Grid, VMState } from "./types";
+export function makeGrid(width: number, height: number): Grid { return { width, height, data: new Uint8Array(width * height) }; }
+export function cloneGrid(g: Grid): Grid { return { width: g.width, height: g.height, data: new Uint8Array(g.data) }; }
+export function getCell(g: Grid, x: number, y: number): number { if (x < 0 || y < 0 || x >= g.width || y >= g.height) return 0; return g.data[y * g.width + x]; }
+export function setCell(g: Grid, x: number, y: number, v: 0 | 1) { if (x<0||y<0||x>=g.width||y>=g.height) return; g.data[y * g.width + x] = v; }
+export function toggleCell(g: Grid, x: number, y: number) { if (x<0||y<0||x>=g.width||y>=g.height) return; const i = y * g.width + x; g.data[i] = g.data[i] ? 0 : 1; }
+export function step(g: Grid): Grid { const out = cloneGrid(g); for (let y=0;y<g.height;y++){ for (let x=0;x<g.width;x++){ let n=0; for (let dy=-1;dy<=1;dy++){ for (let dx=-1;dx<=1;dx++){ if(dx||dy) n += getCell(g,x+dx,y+dy); } } const alive = getCell(g,x,y)===1; const i=y*g.width+x; out.data[i] = alive ? (n===2||n===3?1:0) : (n===3?1:0); } } return out; }
+export function initVM(width = 64, height = 40): VMState { return { grid: makeGrid(width, height) }; }
+```
+
+### src/ast.ts
+```ts
+export type Node = ProgramNode | Statement | Expression;
+export interface ProgramNode { kind: "Program"; body: Statement[]; }
+
+// Statements
+export type Statement =
+  VarDecl | RuleDecl | FunctionDecl | ReturnStmt | CallStmt | SetStmt | ToggleStmt | ClearStmt | StepStmt | ExprStmt |
+  IfStmt | WhileStmt | ForStmt | ForOfStmt | ForInStmt | BlockStmt;
+
+export interface VarDecl { kind: "VarDecl"; name: string; init: Expression; line: number; column: number; }
+export interface RuleDecl { kind: "RuleDecl"; name: string; body: Statement[]; line: number; column: number; }
+export interface FunctionDecl { kind: "FunctionDecl"; name: string; params: string[]; body: Statement[]; line: number; column: number; }
+export interface ReturnStmt { kind: "Return"; value?: Expression | null; line: number; column: number; }
+export interface CallStmt { kind: "CallStmt"; name: string; args: Expression[]; line: number; column: number; }
+export interface SetStmt { kind: "Set"; x: Expression; y: Expression; line: number; column: number; }
+export interface ToggleStmt { kind: "Toggle"; x: Expression; y: Expression; line: number; column: number; }
+export interface ClearStmt { kind: "Clear"; line: number; column: number; }
+export interface StepStmt { kind: "Step"; line: number; column: number; }
+export interface ExprStmt { kind: "ExprStmt"; expr: Expression; line: number; column: number; }
+
+export interface IfStmt { kind: "If"; test: Expression; then: BlockStmt; otherwise?: BlockStmt; line: number; column: number; }
+export interface WhileStmt { kind: "While"; test: Expression; body: BlockStmt; line: number; column: number; }
+export interface ForStmt { kind: "For"; init?: Statement | null; test?: Expression | null; post?: Statement | null; body: BlockStmt; line: number; column: number; }
+export interface ForOfStmt { kind: "ForOf"; varName: string; iterable: Expression; body: BlockStmt; line: number; column: number; }
+export interface ForInStmt { kind: "ForIn"; varName: string; object: Expression; body: BlockStmt; line: number; column: number; }
+export interface BlockStmt { kind: "Block"; body: Statement[]; line: number; column: number; }
+
+// Expressions
+export type Expression = NumberLiteral | StringLiteral | Identifier | BinaryExpr | CallExpr | ParenExpr | ArrayLiteral | IndexExpr | ObjectLiteral;
+export interface NumberLiteral { kind: "NumberLiteral"; value: number; line: number; column: number; }
+export interface StringLiteral { kind: "StringLiteral"; value: string; line: number; column: number; }
+export interface Identifier { kind: "Identifier"; name: string; line: number; column: number; }
+export interface BinaryExpr { kind: "BinaryExpr"; op: "+" | "-" | "*" | "/" | "%" | "==" | "!=" | "<" | ">" | "<=" | ">="; left: Expression; right: Expression; line: number; column: number; }
+export interface CallExpr { kind: "CallExpr"; name: string; args: Expression[]; line: number; column: number; }
+export interface ParenExpr { kind: "ParenExpr"; expr: Expression; line: number; column: number; }
+export interface ArrayLiteral { kind: "ArrayLiteral"; elements: Expression[]; line: number; column: number; }
+export interface IndexExpr { kind: "IndexExpr"; target: Expression; index: Expression; line: number; column: number; }
+export interface ObjectLiteral { kind: "ObjectLiteral"; entries: { key: string; value: Expression }[]; line: number; column: number; }
+```
+
+### src/tokens.ts
+```ts
+export type TokenType =
+  | "identifier" | "number" | "string"
+  | "lparen" | "rparen" | "lbrace" | "rbrace" | "lbracket" | "rbracket" | "comma" | "semicolon" | "assign" | "colon"
+  | "plus" | "minus" | "star" | "slash" | "percent"
+  | "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
+  | "kw_var" | "kw_rule" | "kw_if" | "kw_else" | "kw_while" | "kw_for" | "kw_function" | "kw_return" | "kw_of" | "kw_in"
+  | "eof";
+
+export interface Token { type: TokenType; value?: string; line: number; column: number; }
+
+export function tokenize(source: string): Token[] {
+  const t: Token[] = []; let i = 0, line = 1, col = 1;
+  const push = (type: TokenType, value?: string) => t.push({ type, value, line, column: col });
+  const adv = (n=1) => { while(n--) { const ch = source[i++]; if (ch === "\n") { line++; col = 1; } else { col++; } } };
+  const peek = () => source[i];
+  const peek2 = () => source[i+1];
+
+  while (i < source.length) {
+    const ch = peek();
+    if (ch === " " || ch === "\t" || ch === "\r") { adv(); continue; }
+    if (ch === "\n") { adv(); continue; }
+    if (ch === "/" && peek2() === "/") { while (i < source.length && peek() !== "\n") adv(); continue; }
+
+    if (ch === '"') { // strings
+      const c0 = col; adv(); let s = "";
+      while (i < source.length && peek() !== '"') { s += peek(); adv(); }
+      if (peek() === '"') adv();
+      t.push({ type: "string", value: s, line, column: c0 });
+      continue;
+    }
+
+    if (ch === "(") { push("lparen"); adv(); continue; }
+    if (ch === ")") { push("rparen"); adv(); continue; }
+    if (ch === "{") { push("lbrace"); adv(); continue; }
+    if (ch === "}") { push("rbrace"); adv(); continue; }
+    if (ch === "[") { push("lbracket"); adv(); continue; }
+    if (ch === "]") { push("rbracket"); adv(); continue; }
+    if (ch === ",") { push("comma"); adv(); continue; }
+    if (ch === ";") { push("semicolon"); adv(); continue; }
+    if (ch === ":") { push("colon"); adv(); continue; }
+    if (ch === "=") { if (peek2() === "=") { adv(2); push("eq"); } else { adv(); push("assign"); } continue; }
+    if (ch === "!") { if (peek2() === "=") { adv(2); push("neq"); } else { adv(); } continue; }
+    if (ch === "+") { push("plus"); adv(); continue; }
+    if (ch === "-") { push("minus"); adv(); continue; }
+    if (ch === "*") { push("star"); adv(); continue; }
+    if (ch === "/") { push("slash"); adv(); continue; }
+    if (ch === "%") { push("percent"); adv(); continue; }
+    if (ch === "<") { if (peek2() === "=") { adv(2); push("lte"); } else { adv(); push("lt"); } continue; }
+    if (ch === ">") { if (peek2() === "=") { adv(2); push("gte"); } else { adv(); push("gt"); } continue; }
+
+    if (/[0-9]/.test(ch)) { let s = ""; const c0 = col; while (/[0-9]/.test(peek())) { s += peek(); adv(); } t.push({ type: "number", value: s, line, column: c0 }); continue; }
+    if (/[A-Za-z_]/.test(ch)) { let s = ""; const c0 = col; while (/[A-Za-z0-9_]/.test(peek())) { s += peek(); adv(); }
+      if (s === "var") t.push({ type: "kw_var", line, column: c0 });
+      else if (s === "rule") t.push({ type: "kw_rule", line, column: c0 });
+      else if (s === "if") t.push({ type: "kw_if", line, column: c0 });
+      else if (s === "else") t.push({ type: "kw_else", line, column: c0 });
+      else if (s === "while") t.push({ type: "kw_while", line, column: c0 });
+      else if (s === "for") t.push({ type: "kw_for", line, column: c0 });
+      else if (s === "function") t.push({ type: "kw_function", line, column: c0 });
+      else if (s === "return") t.push({ type: "kw_return", line, column: c0 });
+      else if (s === "of") t.push({ type: "kw_of", line, column: c0 });
+      else if (s === "in") t.push({ type: "kw_in", line, column: c0 });
+      else t.push({ type: "identifier", value: s, line, column: c0 });
+      continue;
+    }
+
+    adv();
+  }
+  t.push({ type: "eof", line, column: col });
+  return t;
+}
+```
+
+### src/parser.ts
+```ts
+// identical to Stage 1I
+export * from "./__reuse_parser_from_1I";
+```
+
+### src/semantics.ts
+```ts
+// identical to Stage 1I
+export * from "./__reuse_semantics_from_1I";
+```
+
+### src/linter.ts
+```ts
+import type { Diagnostic } from "./types";
+
+// Minimal stylistic linter used by IDE and compile() for extra feedback.
+// Policies:
+// 1) Warn on very long lines (>120)
+// 2) Error when a statement looks like a call but misses ';' at end of line
+// 3) Warn on trailing spaces
+export function lint(source: string): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const lines = source.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const lno = i + 1; const line = lines[i];
+    if (line.length > 120) out.push({ message: "Line exceeds 120 characters", line: lno, column: 121, severity: "warning" });
+    if (/\s+$/.test(line)) out.push({ message: "Trailing whitespace", line: lno, column: line.length, severity: "warning" });
+    // naive: call/keyword ending without semicolon (and not a block or control header)
+    if (/\b(set|toggle|clear|step|print|len|[A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*$/.test(line)) {
+      out.push({ message: "Missing ';' at end of statement", line: lno, column: Math.max(1, line.length), severity: "error" });
+    }
+  }
+  return out;
+}
+```
+
+### src/executor.ts
+```ts
+// identical to Stage 1I (no runtime changes needed for 1J)
+export * from "./__reuse_executor_from_1I";
+```
+
+### src/index.ts
+```ts
+export * from "./types";
+export * from "./ast";
+export { makeGrid, cloneGrid, getCell, setCell, toggleCell, step, initVM } from "./vm";
+
+import type { CompileResult } from "./types";
+import type { ProgramNode } from "./ast";
+import { parse, type ParseResult } from "./parser";
+import { semanticCheck } from "./semantics";
+import { execute } from "./executor";
+import { lint } from "./linter";
+
+export function compile(source: string): CompileResult<ProgramNode> {
+  const parsed: ParseResult = parse(source);
+  const style = lint(source).filter((d) => d.severity === "error");
+  const sema = semanticCheck(parsed.program.ast);
+  return { program: parsed.program, errors: [...parsed.errors, ...style, ...sema] };
+}
+
+export { execute, lint };
+```
+
+> **Note:** The `__reuse_*` files above stand in this canvas for the unchanged 1I implementations (parser, semantics, executor). In your repo, you already have these files from Stage 1I — keep them as-is.
+
+---
+
+## mpl-web
+
+### package.json
+```json
+{
+  "name": "mpl-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "lint": "echo 'Lint via Monaco in-IDE for .mpl; add ESLint here if desired'"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.6.0",
+    "monaco-editor": "^0.49.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "mpl-core": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1"
+  }
+}
+```
+
+### src/editor/MonacoMPL.tsx — **comments, folding, hover**
+```tsx
+import Editor, { OnChange, useMonaco } from "@monaco-editor/react";
+import { useEffect } from "react";
+
+export interface MonacoDiag { message: string; line: number; column: number; severity: "error" | "warning"; }
+
+const BUILTINS: Record<string, string> = {
+  set: "set(x:number, y:number) → turn cell on",
+  toggle: "toggle(x:number, y:number) → flip cell",
+  clear: "clear() → clear grid",
+  step: "step() → advance one generation",
+  print: "print(...args:any) → append to console pane",
+  len: "len(x:string|array|map) → number",
+};
+
+const KEYWORDS = [
+  "var","rule","function","return","if","else","while","for","of","in","set","clear","toggle","step","print","len"
+];
+
+export default function MonacoMPL({ value, onChange, diagnostics }: { value: string; onChange: (v: string) => void; diagnostics: MonacoDiag[]; }) {
+  const monaco = useMonaco();
+
+  // Language + tokens
+  useEffect(() => {
+    if (!monaco) return;
+    const id = "mpl";
+    monaco.languages.register({ id });
+    monaco.languages.setMonarchTokensProvider(id, {
+      tokenizer: { root: [
+        [/\/\/.*$/, "comment"],
+        [new RegExp(`\\b(${KEYWORDS.join("|")})\\b`), "keyword"],
+        [/\b\d+\b/, "number"],
+        [/"[^"]*"/, "string"],
+        [[/[{}()[\]]/, "delimiter"]],
+        [/[,.:=+\-/*%<>!\[\]]/, "delimiter"],
+        [/\b[A-Za-z_][A-Za-z0-9_]*\b/, "identifier"],
+      ]}
+    });
+
+    // Comments + brackets + autoIndent
+    monaco.languages.setLanguageConfiguration(id, {
+      comments: { lineComment: "//" },
+      brackets: [ ["{","}"], ["(",")"], ["[","]"] ],
+      autoClosingPairs: [ { open: "{", close: "}" }, { open: "[", close: "]" }, { open: "(", close: ")" }, { open: '"', close: '"' } ],
+      surroundingPairs: [ { open: "{", close: "}" }, { open: "[", close: "]" }, { open: "(", close: ")" }, { open: '"', close: '"' } ],
+      indentationRules: { increaseIndentPattern: /{\s*$/, decreaseIndentPattern: /^\s*}/ }
+    });
+
+    // Folding provider (fold on braces)
+    monaco.languages.registerFoldingRangeProvider(id, {
+      provideFoldingRanges(model) {
+        const ranges: any[] = [];
+        const stack: number[] = [];
+        const text = model.getValue();
+        for (let i = 0, line = 1, col = 1; i < text.length; i++) {
+          const ch = text[i];
+          if (ch === "\n") { line++; col = 1; continue; }
+          if (ch === "{") stack.push(line);
+          if (ch === "}") { const start = stack.pop(); if (start && start < line) { ranges.push({ start, end: line, kind: monaco.languages.FoldingRangeKind.Region }); } }
+          col++;
+        }
+        return ranges;
+      }
+    });
+
+    // Hover provider for built-ins & keywords
+    monaco.languages.registerHoverProvider(id, {
+      provideHover(model, position) {
+        const word = model.getWordAtPosition(position);
+        if (!word) return { contents: [] };
+        const iden = word.word;
+        if (BUILTINS[iden]) {
+          return { contents: [ { value: `**${iden}**` }, { value: BUILTINS[iden] } ] };
+        }
+        if (KEYWORDS.includes(iden)) {
+          return { contents: [ { value: `**keyword** \\`${iden}\\`` } ] };
+        }
+        return { contents: [] };
+      }
+    });
+  }, [monaco]);
+
+  // Diagnostics → markers
+  useEffect(() => {
+    if (!monaco) return; const model = monaco.editor.getModels()[0]; if (!model) return;
+    const frame = requestAnimationFrame(() => {
+      monaco.editor.setModelMarkers(model, "mpl-linter", diagnostics.map((d) => ({
+        message: d.message,
+        startLineNumber: d.line,
+        startColumn: d.column,
+        endLineNumber: d.line,
+        endColumn: d.column + 1,
+        severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+      })));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [monaco, diagnostics]);
+
+  const handleChange: OnChange = (v) => onChange(v || "");
+
+  return (
+    <Editor
+      height="100%"
+      defaultLanguage="mpl"
+      value={value}
+      onChange={handleChange}
+      options={{
+        minimap: { enabled: false },
+        fontSize: 14,
+        tabSize: 2,
+        insertSpaces: true,
+        wordWrap: "on",
+        folding: true,
+        showFoldingControls: "always",
+        renderWhitespace: "selection",
+        scrollBeyondLastLine: false,
+      }}
+    />
+  );
+}
+```
+
+### Other web files
+> The remaining web files (`App.tsx`, `GridCanvas.tsx`, `useMPL.ts`, `examples.ts`, `styles.css`, `vite.config.ts`, `index.html`, `main.tsx`) are unchanged from **Stage 1I**.
+
+---
+
+## Usage examples (now with comments, folding, tooltips)
+```mpl
+// Draw an X and print its length
+var pts = { a:[0,0], b:[7,7], c:[0,7], d:[7,0] };
+for (var k in pts) {
+  var p = pts[k]; // hover over 'for' / 'var' / 'in' / 'len'
+  set(p[0], p[1]);
+}
+print("keys:", len(pts)); // hover over 'print' or 'len' to see docs
+```
+
+---
+
+**Done.** Stage 1J is in. Want me to push **Stage 1K (constants + stdlib)** next?
