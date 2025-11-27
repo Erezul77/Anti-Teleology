@@ -2,9 +2,10 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, ChevronDown, ChevronUp } from 'lucide-react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import Image from 'next/image'
 import TeleologyPanel from './TeleologyPanel'
+import ChatInput from './ChatInput'
 
 interface UnifiedMessage {
   role: 'user' | 'assistant'
@@ -64,7 +65,6 @@ interface UnifiedChatBoxProps {
 // Legacy analysis dashboard removed - using TeleologyPanel only
 
 export function UnifiedChatBox({ messages, setMessages, darkMode, language: externalLanguage, sessionMode = 'coaching' }: UnifiedChatBoxProps) {
-  const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [expandedAnalysisMessages, setExpandedAnalysisMessages] = useState<Set<number>>(new Set())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -150,18 +150,18 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
     }
   }
 
-  const handleSend = async () => {
-    if (!inputMessage.trim() || isLoading) return
+  const handleSendMessage = async (message: string) => {
+    const trimmedMessage = message.trim()
+    if (!trimmedMessage || isLoading) return
 
     const userMessage: UnifiedMessage = {
       role: 'user',
-      content: inputMessage,
+      content: trimmedMessage,
       timestamp: new Date()
     }
 
     const newMessages = [...messages, userMessage]
     setMessages(newMessages)
-    setInputMessage('')
     setIsLoading(true)
 
     // Save user message to localStorage
@@ -169,7 +169,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
 
     try {
       const requestBody = {
-        message: inputMessage,
+        message: trimmedMessage,
         sessionId: sessionId || 'default-session',
         userId: userId || 'default-user'
       }
@@ -253,13 +253,6 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
       saveToLocalStorage(updatedMessages)
     } finally {
       setIsLoading(false)
-    }
-  }
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
     }
   }
 
@@ -370,41 +363,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
       </div>
 
       {/* Input Area */}
-      <div className={`p-3 sm:p-6 border-t ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-        <div className="flex space-x-2 sm:space-x-4">
-          <div className="flex-1">
-            <textarea
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="Share your emotions, challenges, or what's on your mind..."
-              className={`w-full p-3 sm:p-4 rounded-xl resize-none ${
-                darkMode 
-                  ? 'bg-gray-800 border-gray-600 text-white placeholder-gray-400' 
-                  : 'bg-white border-gray-300 text-black placeholder-gray-500'
-              } border focus:outline-none focus:ring-2 focus:ring-blue-500`}
-              rows={2}
-              maxLength={1000}
-              disabled={isLoading}
-            />
-          </div>
-          <button
-            onClick={handleSend}
-            disabled={isLoading || !inputMessage.trim()}
-            className={`px-4 py-3 sm:px-6 sm:py-4 rounded-xl font-medium transition-all duration-200 ${
-              isLoading || !inputMessage.trim()
-                ? 'opacity-50 cursor-not-allowed'
-                : 'hover:scale-105'
-            } ${
-              darkMode 
-                ? 'bg-blue-600 text-white hover:bg-blue-700' 
-                : 'bg-blue-500 text-white hover:bg-blue-600'
-            }`}
-          >
-            <Send className="w-4 h-4 sm:w-5 sm:h-5" />
-          </button>
-        </div>
-      </div>
+      <ChatInput onSend={handleSendMessage} disabled={isLoading} />
     </div>
   )
 } 

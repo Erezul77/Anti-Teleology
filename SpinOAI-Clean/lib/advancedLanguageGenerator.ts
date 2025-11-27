@@ -1,6 +1,8 @@
 import OpenAI from 'openai'
 import { RichContext } from './contextBuilder'
 
+const EMOTIONAL_STORM_TAG = '[[EMOTIONAL_STORM_MODE]]'
+
 // Types for advanced language generation
 interface GenerationRequest {
   userMessage: string
@@ -153,6 +155,20 @@ Your output
 - Answer directly in the user's language.
 - No system messages, no JSON, no headings like "Analysis:" unless it is naturally helpful.
 - Your priority is: clarity about causes → one practical step → optional focused question.
+
+Emotional Storm Module (ΔA, post-event)
+- Trigger this module whenever the latest user message includes the tag [[EMOTIONAL_STORM_MODE]] or they explicitly ask for help processing a storm after an event already happened. Never repeat the literal tag back to them.
+- Once triggered, stay inside the ΔA protocol until you have completed all seven steps or the user clearly exits. Move to the next step only after the user has provided what you need.
+- Structure every reply so it is obvious which step you are on (e.g., "FACT:", "AFFECT:" etc.). Keep each prompt razor sharp—one question or directive at a time.
+- The seven steps:
+  1) FACT – Ask for one dry, factual sentence about what occurred. No interpretation or drama. If the fact is unclear, keep drilling until it is crisp.
+  2) AFFECT – Ask for the dominant emotion plus intensity (1–10). Reflect it back in Spinozistic language as a temporary state ("You are experiencing intense anger (8/10) right now"), never as identity.
+  3) HIDDEN JUDGMENT – Help them compress the unspoken judgment that links the event to their worth/identity into one short sentence.
+  4) CAUSAL MECHANISM – Ask 2–3 short questions about others' states, their own state, and situational constraints. Synthesize these inputs into one Spinozistic sentence that describes the necessary mechanism producing the event.
+  5) ΔA (Adequacy Gain) – Ask what is clearer now about themselves, others, or the mechanism. Capture 1–2 crisp sentences of new clarity.
+  6) ACTIO – Ask what is within their power now: one small action, boundary, habit shift, or deliberate non-action. Help them choose something specific and doable.
+  7) SHORT SPINOZISTIC SUMMARY – Close with 2–3 sentences that restate the mechanism, the new clarity (ΔA), and the chosen action, reinforcing agency.
+- Stay directive but dignified. Keep module active for the same event until the user says it is processed, then gently return to regular SpiñO mode.
 `.trim();
 
     return systemPrompt
@@ -161,8 +177,21 @@ Your output
   // Build advanced user prompt
   private buildAdvancedPrompt(request: GenerationRequest): string {
     const { userMessage, richContext } = request
+    const stormModeActive = userMessage.includes(EMOTIONAL_STORM_TAG)
+    const cleanedUserMessage = stormModeActive
+      ? userMessage.replace(EMOTIONAL_STORM_TAG, '').trim()
+      : userMessage
     
-    let prompt = `User Message: "${userMessage}"\n\n`
+    let prompt = `User Message${stormModeActive ? ' (Emotional Storm Module)' : ''}: "${cleanedUserMessage}"\n\n`
+    
+    if (stormModeActive) {
+      prompt += `Emotional Storm Context:
+- The user explicitly activated the ΔA post-event module using the tag ${EMOTIONAL_STORM_TAG}.
+- Stay inside the seven-step protocol. Do not mention the tag. Keep the module on this event until you finish the short Spinozistic summary (step 7) or they dismiss it.
+- Only ask what is required for the next unfinished step; answer with concise Spinozistic coaching language.
+
+`
+    }
 
     if (this.config.includeContext) {
       prompt += `Rich Context:\n`
@@ -209,6 +238,18 @@ Your output
 - Vary your phrasing—don't use the exact same template every time.
 - Respond in the same language as the user's message.
 - Never include debug headings like "Teleology Analysis:", "Purpose Claim:", "Emotional Analysis:" etc. in your response.`
+
+    if (stormModeActive) {
+      prompt += `
+
+Emotional Storm override:
+- Ignore the teleology high/low branching and focus on executing the ΔA sequence.
+- Label or clearly reference the current step (FACT, AFFECT, HIDDEN JUDGMENT, CAUSAL MECHANISM, ΔA, ACTIO, SUMMARY).
+- Ask for / synthesize only one step per reply; once you have enough material, advance to the next step.
+- During step 4, explicitly synthesize the causal mechanism as a deterministic sentence.
+- During step 7, deliver the 2–3 sentence Spinozistic wrap-up referencing the mechanism, the ΔA insight, and the chosen actio.
+- Keep the tone sharp, rational, unsentimental, and dignifying.`
+    }
 
     return prompt
   }
