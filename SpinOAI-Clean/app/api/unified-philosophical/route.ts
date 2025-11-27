@@ -26,27 +26,35 @@ export async function POST(request: NextRequest) {
     console.log('🚀 Processing request with Emotional Wizard System...')
     console.log('📊 Request Debug:', { message, sessionId, userId })
 
+    const stormTag = '[[EMOTIONAL_STORM_MODE]]'
+    const isEmotionalStorm = typeof message === 'string' && message.includes(stormTag)
+
     // Analyze teleology in user message
-    console.log('🔍 Analyzing teleology in user message...')
     let teleologyAnalysis;
-    try {
-      teleologyAnalysis = await analyzeTeleology(message)
-      console.log('📊 Teleology Analysis:', {
-        teleologyScore: teleologyAnalysis.teleologyScore,
-        teleologyType: teleologyAnalysis.teleologyType,
-        manipulationRisk: teleologyAnalysis.manipulationRisk,
-        detectedPhrases: teleologyAnalysis.detectedPhrases.length
-      })
-    } catch (teleologyError) {
-      console.error('❌ Teleology analysis failed:', teleologyError)
-      // Fallback to empty teleology analysis
-      teleologyAnalysis = {
-        teleologyScore: 0,
-        teleologyType: null,
-        manipulationRisk: 'low' as const,
-        detectedPhrases: [],
-        purposeClaim: null,
-        neutralCausalParaphrase: null
+    if (isEmotionalStorm) {
+      console.log('⚡ Emotional Storm detected – skipping teleology analysis for this turn.')
+      teleologyAnalysis = undefined
+    } else {
+      console.log('🔍 Analyzing teleology in user message...')
+      try {
+        teleologyAnalysis = await analyzeTeleology(message)
+        console.log('📊 Teleology Analysis:', {
+          teleologyScore: teleologyAnalysis.teleologyScore,
+          teleologyType: teleologyAnalysis.teleologyType,
+          manipulationRisk: teleologyAnalysis.manipulationRisk,
+          detectedPhrases: teleologyAnalysis.detectedPhrases.length
+        })
+      } catch (teleologyError) {
+        console.error('❌ Teleology analysis failed:', teleologyError)
+        // Fallback to empty teleology analysis
+        teleologyAnalysis = {
+          teleologyScore: 0,
+          teleologyType: null,
+          manipulationRisk: 'low' as const,
+          detectedPhrases: [],
+          purposeClaim: null,
+          neutralCausalParaphrase: null
+        }
       }
     }
 
@@ -55,7 +63,8 @@ export async function POST(request: NextRequest) {
       userMessage: message,
       sessionId: sessionId || 'default-session',
       userId: userId || 'default-user',
-      teleologyAnalysis // Pass teleology analysis to the wizard system
+      teleologyAnalysis,
+      skipTeleology: isEmotionalStorm
     })
     
     console.log('📊 Wizard Response Debug:', {
@@ -130,7 +139,7 @@ export async function POST(request: NextRequest) {
       manipulationEffect: wizardResponse.manipulationEffect,
       memoryUpdate: wizardResponse.memoryUpdate,
       systemSummary: wizardResponse.systemSummary,
-      teleology: wizardResponse.teleology ?? null // Include teleology analysis
+      teleology: isEmotionalStorm ? null : wizardResponse.teleology ?? null // Include teleology analysis when available
     }
 
     console.log('✅ Emotional Wizard System response generated successfully')

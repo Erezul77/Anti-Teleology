@@ -12,6 +12,7 @@ interface WizardRequest {
   userId: string
   config?: WizardConfig
   teleologyAnalysis?: TeleologyAnalysis
+  skipTeleology?: boolean
 }
 
 export interface TeleologyViewModel {
@@ -150,15 +151,20 @@ export class EmotionalWizardSystem {
         adequacyAnalysis = await this.adequacyEngine.analyzeEmotionalAdequacy(emotionalAnalysis, adequacyContext)
       }
 
-      // STEP 3.5: Teleology Analysis (if not provided)
-      const teleologyAnalysis = request.teleologyAnalysis || await analyzeTeleology(userMessage)
-      if (teleologyAnalysis.teleologyScore > 0) {
-        console.log('🔍 Teleology detected:', {
-          score: teleologyAnalysis.teleologyScore,
-          type: teleologyAnalysis.teleologyType,
-          risk: teleologyAnalysis.manipulationRisk,
-          phrases: teleologyAnalysis.detectedPhrases.length
-        })
+      // STEP 3.5: Teleology Analysis (if not provided and not skipped)
+      let teleologyAnalysis: TeleologyAnalysis | undefined = undefined
+      if (!request.skipTeleology) {
+        teleologyAnalysis = request.teleologyAnalysis || await analyzeTeleology(userMessage)
+        if (teleologyAnalysis.teleologyScore > 0) {
+          console.log('🔍 Teleology detected:', {
+            score: teleologyAnalysis.teleologyScore,
+            type: teleologyAnalysis.teleologyType,
+            risk: teleologyAnalysis.manipulationRisk,
+            phrases: teleologyAnalysis.detectedPhrases.length
+          })
+        }
+      } else {
+        console.log('⚡ Teleology analysis skipped by request flag.')
       }
 
       // STEP 4: Context Building
@@ -241,14 +247,16 @@ export class EmotionalWizardSystem {
       console.log(`🧙‍♂️ Emotional Wizard System completed in ${processingTime}ms`)
 
       // Map teleology analysis to view model
-      const teleologyViewModel: TeleologyViewModel = {
-        teleologyScore: teleologyAnalysis.teleologyScore,
-        teleologyType: teleologyAnalysis.teleologyType,
-        manipulationRisk: teleologyAnalysis.manipulationRisk,
-        detectedPhrases: teleologyAnalysis.detectedPhrases,
-        purposeClaim: teleologyAnalysis.purposeClaim,
-        neutralCausalParaphrase: teleologyAnalysis.neutralCausalParaphrase
-      }
+      const teleologyViewModel: TeleologyViewModel | null = teleologyAnalysis
+        ? {
+            teleologyScore: teleologyAnalysis.teleologyScore,
+            teleologyType: teleologyAnalysis.teleologyType,
+            manipulationRisk: teleologyAnalysis.manipulationRisk,
+            detectedPhrases: teleologyAnalysis.detectedPhrases,
+            purposeClaim: teleologyAnalysis.purposeClaim,
+            neutralCausalParaphrase: teleologyAnalysis.neutralCausalParaphrase
+          }
+        : null
 
       return {
         response: finalResponse,
