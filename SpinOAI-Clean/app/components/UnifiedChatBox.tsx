@@ -303,14 +303,16 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
               }`}>
                 <div className="flex items-start space-x-3">
                                      {message.role === 'assistant' && (
-                     <Image 
-                       src="/favicon.PNG" 
-                       alt="SpiñO" 
-                       width={96} 
-                       height={96} 
-                       className="rounded-full"
-                     />
-                   )}
+                    <div className="hidden sm:block">
+                      <Image 
+                        src="/favicon.PNG" 
+                        alt="SpiñO" 
+                        width={64} 
+                        height={64} 
+                        className="rounded-full"
+                      />
+                    </div>
+                  )}
                   <div className="flex-1">
                     <div className="text-xs sm:text-sm font-medium mb-1" style={{fontFamily: 'Arial Unicode MS, Arial, sans-serif'}}>
                       {message.role === 'user' ? 'You' : 'SpiñO'}
@@ -361,17 +363,19 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
             animate={{ opacity: 1 }}
             className="flex justify-start"
           >
-            <div className={`max-w-full sm:max-w-3xl rounded-2xl p-3 sm:p-4 ${
+              <div className={`max-w-full sm:max-w-3xl rounded-2xl p-3 sm:p-4 ${
               darkMode ? 'bg-gray-800 text-white' : 'bg-gray-100 text-black'
             }`}>
               <div className="flex items-center space-x-3">
-                                 <Image 
-                   src="/favicon.PNG" 
-                   alt="SpiñO" 
-                   width={96} 
-                   height={96} 
-                   className="rounded-full animate-pulse"
-                 />
+                                 <div className="hidden sm:block">
+                  <Image 
+                    src="/favicon.PNG" 
+                    alt="SpiñO" 
+                    width={64} 
+                    height={64} 
+                    className="rounded-full animate-pulse"
+                  />
+                </div>
                 <div className="flex space-x-1">
                   <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
                   <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>

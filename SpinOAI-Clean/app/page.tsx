@@ -147,7 +147,7 @@ export default function HomePage() {
   }
 
   return (
-    <div className={`h-screen transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
+    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Beautiful Centered Header - Mobile Responsive */}
       <div className="fixed top-2 sm:top-4 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2">
         <motion.h1 
@@ -189,7 +189,7 @@ export default function HomePage() {
             initial={{ opacity: 0, y: -10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            className={`absolute top-12 left-0 w-96 sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
+            className={`absolute top-12 left-0 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
               darkMode 
                 ? 'bg-gray-900/95 border-gray-600 text-white' 
                 : 'bg-white/95 border-gray-300 text-gray-900'
@@ -293,9 +293,9 @@ export default function HomePage() {
       </div>
 
       {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
-      <div className="h-screen flex flex-col lg:flex-row overflow-hidden pt-20 sm:pt-16">
+      <div className="flex-1 flex flex-col lg:flex-row pt-24 sm:pt-20 lg:pt-16 lg:overflow-hidden">
         {/* Main Chat Area */}
-        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 pt-24 sm:pt-20">
+        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6">
           <UnifiedChatBox messages={messages} setMessages={setMessages} darkMode={darkMode} language={language} sessionMode={sessionMode} />
         </div>
 
