@@ -363,7 +363,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
       </div>
 
       {/* Input Area */}
-      <ChatInput onSend={handleSendMessage} disabled={isLoading} />
+      <ChatInput onSend={handleSendMessage} disabled={isLoading} darkMode={darkMode} />
     </div>
   )
 } 

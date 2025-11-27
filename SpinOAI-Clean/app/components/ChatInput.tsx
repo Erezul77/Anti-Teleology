@@ -5,11 +5,16 @@ import React, { useState, KeyboardEvent } from "react";
 type ChatInputProps = {
   onSend: (message: string) => void;
   disabled?: boolean;
+  darkMode?: boolean;
 };
 
 type ChatMode = "normal" | "storm";
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
+const ChatInput: React.FC<ChatInputProps> = ({
+  onSend,
+  disabled,
+  darkMode = false
+}) => {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<ChatMode>("normal");
 
@@ -39,8 +44,21 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
     setMode((prev) => (prev === "storm" ? "normal" : "storm"));
   };
 
+  const containerClasses = [
+    "w-full border-t",
+    darkMode ? "border-gray-700 bg-gray-900" : "border-neutral-200 bg-white"
+  ].join(" ");
+
+  const helperTextClass = darkMode ? "text-gray-400" : "text-neutral-400";
+  const toggleActiveClass = darkMode
+    ? "bg-red-500/20 text-red-200 ring-1 ring-red-400/60"
+    : "bg-red-100 text-red-700 ring-1 ring-red-300";
+  const toggleIdleClass = darkMode
+    ? "bg-gray-800 text-gray-200 hover:bg-gray-700"
+    : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200";
+
   return (
-    <div className="w-full border-t border-neutral-200 bg-white">
+    <div className={containerClasses}>
       <div className="mx-auto flex max-w-3xl flex-col gap-2 px-3 py-2">
         {/* Mode toggle row */}
         <div className="flex items-center justify-between gap-2 text-xs sm:text-sm">
@@ -50,19 +68,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
               onClick={toggleMode}
               className={[
                 "rounded-full px-3 py-1 text-xs font-medium transition",
-                mode === "storm"
-                  ? "bg-red-100 text-red-700 ring-1 ring-red-300"
-                  : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200"
+                mode === "storm" ? toggleActiveClass : toggleIdleClass
               ].join(" ")}
             >
               {mode === "storm"
-                ? "🧠 אני בסערה רגשית (Spino ΔA פעיל)"
-                : "🧠 אני בסערה רגשית (Spino ΔA)"}
+                ? "🧠 Emotional storm active (Spino ΔA ON)"
+                : "🧠 Process an emotional storm (Spino ΔA)"}
             </button>
-            <span className="text-neutral-400">
+            <span className={helperTextClass}>
               {mode === "storm"
-                ? "ההודעה הבאה תופעל במודול שפינוזה ΔA (בדיעבד)."
-                : "לחץ אם אתה רוצה לעבד סערה רגשית בדיעבד."}
+                ? "Next message will trigger the post-event Spino ΔA module."
+                : "Click if you want to process a past emotional storm."}
             </span>
           </div>
         </div>
@@ -71,12 +87,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
         <div className="flex items-end gap-2">
           <div className="flex-1">
             <textarea
-              className="w-full resize-none rounded-2xl border border-neutral-200 px-3 py-2 text-sm shadow-sm outline-none focus:border-neutral-400 focus:ring-0"
+              className={[
+                "w-full resize-none rounded-2xl border px-3 py-2 text-sm shadow-sm outline-none focus:ring-0",
+                darkMode
+                  ? "border-gray-700 bg-gray-800 text-gray-100 placeholder-gray-500 focus:border-gray-500"
+                  : "border-neutral-200 bg-white text-gray-900 placeholder-gray-400 focus:border-neutral-400"
+              ].join(" ")}
               rows={2}
               placeholder={
                 mode === "storm"
-                  ? "תאר בקצרה מה קרה או מה כואב – ספיניו יעזור לפרק את זה כמנגנון…"
-                  : "כתוב לספיניו…"
+                  ? "Describe briefly what happened or what hurts—SpiñO will unpack it causally…"
+                  : "Write to SpiñO…"
               }
               value={value}
               onChange={(e) => setValue(e.target.value)}
@@ -91,11 +112,15 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
             className={[
               "mb-[2px] inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-medium",
               disabled || !value.trim()
-                ? "cursor-not-allowed bg-neutral-200 text-neutral-400"
-                : "bg-black text-white hover:bg-neutral-800"
+                ? darkMode
+                  ? "cursor-not-allowed bg-gray-700 text-gray-500"
+                  : "cursor-not-allowed bg-neutral-200 text-neutral-400"
+                : darkMode
+                  ? "bg-white text-gray-900 hover:bg-gray-200"
+                  : "bg-black text-white hover:bg-neutral-800"
             ].join(" ")}
           >
-            שלח
+            Send
           </button>
         </div>
       </div>
