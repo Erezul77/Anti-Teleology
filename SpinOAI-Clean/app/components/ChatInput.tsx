@@ -72,8 +72,8 @@ const ChatInput: React.FC<ChatInputProps> = ({
               ].join(" ")}
             >
               {mode === "storm"
-                ? "🧠 Emotional storm active (Spino ΔA ON)"
-                : "🧠 Process an emotional storm (Spino ΔA)"}
+                ? "Emotional storm active (Spino ΔA ON)"
+                : "Process an emotional storm (Spino ΔA)"}
             </button>
             <span className={helperTextClass}>
               {mode === "storm"

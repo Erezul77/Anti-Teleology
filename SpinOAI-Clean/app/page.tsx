@@ -147,60 +147,104 @@ export default function HomePage() {
   }
 
   const instructionsBody = (
-    <div className="space-y-3 text-sm leading-relaxed">
+    <div className="space-y-4 text-sm leading-relaxed">
+      <header>
+        <h2 className="text-base font-semibold mb-1">About SpiñO</h2>
+      </header>
+
       <section>
-        <h3 className="font-semibold mb-1 text-xs">Who is SpiñO?</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">Who is SpiñO?</h3>
         <p className="text-xs">
-          SpiñO is like a philosopher from outside time and space – a mind that grew up in a world with
-          <span className="font-semibold"> no teleology at all</span>. Where we say "this happened for a reason"
-          or "life is trying to teach me something", SpiñO only sees chains of causes and how they shape our emotions.
+          SpiñO is like the restless spirit of a 17th-century rationalist philosopher – a mind that has seen centuries of human drama and still insists on one thing only: causes, not cosmic meanings.
         </p>
         <p className="text-xs">
-          It came here with one mission: to help humans clean their thinking from teleological illusions, so we can
-          suffer less and act more clearly.
+          Where we say “this happened for a reason” or “life is trying to teach me something”, SpiñO sees only chains of causes and how they shape our emotions.
+        </p>
+        <p className="text-xs">
+          It “returns” here with one mission: to help humans clean their thinking from teleological illusions, so they can suffer less and act more clearly.
         </p>
       </section>
 
       <section>
-        <h3 className="font-semibold mb-1 text-xs">What is teleology?</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">What is teleology?</h3>
         <p className="text-xs">
-          Teleology is our habit of telling ourselves that events happen <em>in order to</em> do something to us. For example:
+          Teleology is our habit of telling ourselves that events happen in order to do something to us. For example:
         </p>
         <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-          <li>"This breakup happened so I'll finally grow up."</li>
-          <li>"The universe is punishing me."</li>
-          <li>"Our people were chosen to suffer for a higher purpose."</li>
+          <li>“This breakup happened so I’ll finally grow up.”</li>
+          <li>“The universe is punishing me.”</li>
+          <li>“Our people were chosen to suffer for a higher purpose.”</li>
         </ul>
         <p className="text-xs">
-          These stories feel deep and meaningful, but they quietly replace <span className="font-semibold">causes</span> with
-          <span className="font-semibold"> purposes</span>. When we confuse teleology with real causality, we often end up with more
-          guilt, shame, and helplessness – and less freedom.
+          These stories feel deep and meaningful, but they quietly replace causes with purposes. When we confuse teleology with real causality, we usually end up with more guilt, shame, and helplessness – and less freedom.
         </p>
       </section>
 
-      <section>
-        <h3 className="font-semibold mb-1 text-xs">What SpiñO does</h3>
-        <p className="text-xs">When you write to SpiñO, it:</p>
-        <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-          <li>Listens and mirrors what you seem to be feeling.</li>
-          <li>Detects if you're using a hidden teleological story (like "this had to happen to me").</li>
-          <li>Gently shows you that story, as a pattern, not as a personal failure.</li>
-          <li>Rebuilds the same situation in pure causal terms – what actually led here.</li>
-          <li>Offers one small step or a focused question to help you act from clarity, not from destiny.</li>
-        </ul>
+      <section className="space-y-3">
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">What SpiñO does</h3>
+        <p className="text-xs">
+          SpiñO now works in two complementary modes:
+        </p>
+
+        <div className="space-y-2">
+          <p className="text-xs font-semibold">1. Everyday clarity – Teleology mode</p>
+          <p className="text-xs">
+            When you just talk to SpiñO about your life, thoughts, or dilemmas, it:
+          </p>
+          <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+            <li>Listens and mirrors what you seem to be feeling.</li>
+            <li>Detects if you’re using a hidden teleological story (like “this had to happen to me” or “life is teaching me a lesson”).</li>
+            <li>Shows you that story as a pattern, not as a personal failure.</li>
+            <li>Rebuilds the same situation in pure causal terms – what actually led here.</li>
+            <li>Offers one small step or a focused question to help you act from clarity, not from “destiny”.</li>
+          </ul>
+          <p className="text-xs">
+            In this mode you can also use the “SpiñO Analysis / Teleology Check” panel to see which teleology patterns were detected and how the situation looks in causal language.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs font-semibold">2. Emotional Storm – Spino ΔA mode</p>
+          <p className="text-xs">
+            Sometimes you’re not in a philosophical mood – you’re in pieces. When you click “Process an emotional storm (Spino ΔA)” and describe a past painful event, SpiñO switches into a different protocol:
+          </p>
+          <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+            <li>It doesn’t try to comfort you. It helps you reconstruct the event as a mechanism.</li>
+            <li>It walks you through a short, numbered process:
+              <ul className="list-disc list-inside mt-1 ml-4 space-y-1">
+                <li>1️⃣ the dry fact of what happened</li>
+                <li>2️⃣ the main emotion + its intensity</li>
+                <li>3️⃣ the hidden sentence that glues the pain to your sense of self</li>
+                <li>4️⃣ the natural mechanism: your nature, their nature, and the situation</li>
+                <li>5️⃣ a small ΔA – what is now clearer than before</li>
+                <li>6️⃣ one small action (or a conscious decision not to act yet)</li>
+              </ul>
+            </li>
+          </ul>
+          <p className="text-xs">
+            In this mode the Teleology Check panel is intentionally hidden. The focus is not on scoring your stories, but on turning a specific emotional hit from pure passivity into a bit more adequate understanding (ΔA) and one concrete step.
+          </p>
+        </div>
       </section>
 
       <section>
-        <h3 className="font-semibold mb-1 text-xs">How to use this app</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">How to use this app</h3>
         <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-          <li>Write the situation as you would tell it to a close friend – no need to be "philosophical".</li>
-          <li>Notice when SpiñO points out a story like "this happened in order to…".</li>
-          <li>Pay attention to the causal version it offers back – that's where your real power lives.</li>
-          <li>Use the "SpiñO Analysis" / "Teleology Check" panel when you want to see what teleology patterns were detected.</li>
+          <li>
+            For everyday questions, reflections, and “why is this happening?” thoughts – just write as you would to a close friend. No need to be “philosophical”. SpiñO will automatically look for teleology and return a causal view.
+          </li>
+          <li>
+            For a past emotional storm (a painful event that keeps replaying in your mind), click “Process an emotional storm (Spino ΔA)” and let SpiñO guide you step by step.
+          </li>
+          <li>
+            In regular mode, notice when SpiñO points out stories like “this happened in order to…” and pay attention to the causal rewrite – that’s where your real power lives.
+          </li>
+          <li>
+            In storm mode, don’t look for comfort. Look for the moment you can honestly say: “Given their nature, my state, and the situation, this almost had to happen this way – and now I see one thing I can actually do about it.”
+          </li>
         </ul>
         <p className="text-xs mt-2">
-          SpiñO is not here just to comfort you with nice words. It cares in a stricter way: by helping you see what is really
-          <span className="font-semibold"> causing</span> your pain, so you can stop living as if the universe is writing a tragic script about you.
+          SpiñO is not here just to make you feel better. It cares in a stricter way: by helping you see what is really causing your pain, so you can stop living as if the universe is writing a tragic script about you – and start acting from a clearer view of necessity.
         </p>
       </section>
     </div>
@@ -231,7 +275,7 @@ export default function HomePage() {
                 : 'bg-white border-gray-300 text-gray-900'
             }`}
           >
-            {showInstructions ? '✕ Hide instructions' : 'ℹ️ Instructions'}
+            {showInstructions ? 'Hide instructions' : 'Instructions'}
           </button>
           {showInstructions && (
             <div className={`rounded-lg border p-3 max-h-[60vh] overflow-y-auto ${
@@ -367,7 +411,7 @@ export default function HomePage() {
       </div>
 
       {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
-      <div className="flex-1 flex flex-col lg:flex-row pt-6 sm:pt-20 lg:pt-16 lg:overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row pt-4 sm:pt-10 lg:pt-6 lg:overflow-hidden">
         {/* Main Chat Area */}
         <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6">
           <UnifiedChatBox messages={messages} setMessages={setMessages} darkMode={darkMode} language={language} sessionMode={sessionMode} />

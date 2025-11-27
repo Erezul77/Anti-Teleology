@@ -26,13 +26,13 @@ export const metadata: Metadata = {
   },
   icons: {
     icon: [
-      { url: '/favicon.PNG', sizes: '32x32', type: 'image/png' },
-      { url: '/favicon.PNG', sizes: '192x192', type: 'image/png' },
-      { url: '/favicon.PNG', sizes: '512x512', type: 'image/png' },
+      { url: '/assets/spino-favicon.png', sizes: '32x32', type: 'image/png' },
+      { url: '/assets/spino-favicon.png', sizes: '192x192', type: 'image/png' },
+      { url: '/assets/spino-favicon.png', sizes: '512x512', type: 'image/png' },
     ],
-    shortcut: ['/favicon.PNG'],
+    shortcut: ['/assets/spino-favicon.png'],
     apple: [
-      { url: '/favicon.PNG', sizes: '180x180', type: 'image/png' }
+      { url: '/assets/spino-favicon.png', sizes: '180x180', type: 'image/png' }
     ],
   },
   manifest: '/site.webmanifest',
@@ -46,10 +46,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <link rel="icon" href="/favicon.PNG" type="image/png" />
-        <link rel="alternate icon" href="/favicon.PNG" type="image/png" />
-        <link rel="shortcut icon" href="/favicon.PNG" type="image/png" />
-        <link rel="apple-touch-icon" href="/favicon.PNG" />
+        <link rel="icon" href="/assets/spino-favicon.png" type="image/png" />
+        <link rel="alternate icon" href="/assets/spino-favicon.png" type="image/png" />
+        <link rel="shortcut icon" href="/assets/spino-favicon.png" type="image/png" />
+        <link rel="apple-touch-icon" href="/assets/spino-favicon.png" />
         <link rel="manifest" href="/site.webmanifest" />
         <meta name="theme-color" content="#2c3e50" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
