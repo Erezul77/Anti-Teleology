@@ -26,11 +26,16 @@ export const metadata: Metadata = {
   },
   icons: {
     icon: [
-      { url: '/favicon.PNG', sizes: '32x32', type: 'image/png' }
+      { url: '/favicon.PNG', sizes: '32x32', type: 'image/png' },
+      { url: '/favicon.PNG', sizes: '192x192', type: 'image/png' },
+      { url: '/favicon.PNG', sizes: '512x512', type: 'image/png' },
     ],
-    shortcut: '/favicon.PNG',
-    apple: '/favicon.PNG',
+    shortcut: ['/favicon.PNG'],
+    apple: [
+      { url: '/favicon.PNG', sizes: '180x180', type: 'image/png' }
+    ],
   },
+  manifest: '/site.webmanifest',
 }
 
 export default function RootLayout({
@@ -45,6 +50,7 @@ export default function RootLayout({
         <link rel="alternate icon" href="/favicon.PNG" type="image/png" />
         <link rel="shortcut icon" href="/favicon.PNG" type="image/png" />
         <link rel="apple-touch-icon" href="/favicon.PNG" />
+        <link rel="manifest" href="/site.webmanifest" />
         <meta name="theme-color" content="#2c3e50" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta httpEquiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
