@@ -17,7 +17,7 @@ const emotionalWizard = new EmotionalWizardSystem({
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { message, sessionId, userId } = body
+    const { message, sessionId, userId, isEmotionalStorm: clientStormFlag } = body
 
     if (!message) {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 })
@@ -27,7 +27,8 @@ export async function POST(request: NextRequest) {
     console.log('📊 Request Debug:', { message, sessionId, userId })
 
     const stormTag = '[[EMOTIONAL_STORM_MODE]]'
-    const isEmotionalStorm = typeof message === 'string' && message.includes(stormTag)
+    const stormTagDetected = typeof message === 'string' && message.includes(stormTag)
+    const isEmotionalStorm = Boolean(clientStormFlag) || stormTagDetected
 
     // Analyze teleology in user message
     let teleologyAnalysis;

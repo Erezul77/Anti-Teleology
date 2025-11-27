@@ -12,9 +12,14 @@ type TeleologyViewModel = {
 interface TeleologyPanelProps {
   teleology: TeleologyViewModel | null;
   darkMode?: boolean;
+  isEmotionalStorm?: boolean;
 }
 
-export default function TeleologyPanel({ teleology, darkMode = true }: TeleologyPanelProps) {
+export default function TeleologyPanel({ teleology, darkMode = true, isEmotionalStorm = false }: TeleologyPanelProps) {
+  if (isEmotionalStorm) {
+    return null;
+  }
+
   if (!teleology) {
     return (
       <div className={`rounded-xl border p-3 text-sm ${

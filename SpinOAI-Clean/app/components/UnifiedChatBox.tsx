@@ -64,6 +64,8 @@ interface UnifiedChatBoxProps {
 
 // Legacy analysis dashboard removed - using TeleologyPanel only
 
+const EMOTIONAL_STORM_TAG = '[[EMOTIONAL_STORM_MODE]]'
+
 export function UnifiedChatBox({ messages, setMessages, darkMode, language: externalLanguage, sessionMode = 'coaching' }: UnifiedChatBoxProps) {
   const [isLoading, setIsLoading] = useState(false)
   const [expandedAnalysisMessages, setExpandedAnalysisMessages] = useState<Set<number>>(new Set())
@@ -80,6 +82,24 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  const reversedMessages = [...messages].slice().reverse()
+  const lastUserMessage = reversedMessages.find(msg => msg.role === 'user')
+  const lastAssistantMessage = reversedMessages.find(msg => msg.role === 'assistant')
+
+  const userStormTag = !!lastUserMessage &&
+    typeof lastUserMessage.content === 'string' &&
+    lastUserMessage.content.startsWith(EMOTIONAL_STORM_TAG)
+
+  const assistantStormPattern = !!lastAssistantMessage &&
+    typeof lastAssistantMessage.content === 'string' &&
+    (
+      lastAssistantMessage.content.includes('turn part of this emotion from passive suffering into active understanding (ΔA)') ||
+      lastAssistantMessage.content.includes('1️⃣ FACT') ||
+      lastAssistantMessage.content.includes('HIDDEN JUDGMENT')
+    )
+
+  const isEmotionalStorm = userStormTag || assistantStormPattern
 
   // Save messages to localStorage
   const saveToLocalStorage = (newMessages: UnifiedMessage[]) => {
@@ -153,6 +173,8 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
   const handleSendMessage = async (message: string) => {
     const trimmedMessage = message.trim()
     if (!trimmedMessage || isLoading) return
+    const messageHasStormTag = trimmedMessage.startsWith(EMOTIONAL_STORM_TAG)
+    const stormActiveForRequest = messageHasStormTag || assistantStormPattern
 
     const userMessage: UnifiedMessage = {
       role: 'user',
@@ -171,7 +193,8 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
       const requestBody = {
         message: trimmedMessage,
         sessionId: sessionId || 'default-session',
-        userId: userId || 'default-user'
+        userId: userId || 'default-user',
+        isEmotionalStorm: stormActiveForRequest
       }
       
       console.log('Sending unified request:', requestBody)
@@ -297,7 +320,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                     </div>
                     
                     {/* Show teleology analysis toggle for assistant messages */}
-                    {message.role === 'assistant' && message.teleology && (
+                    {message.role === 'assistant' && message.teleology && !isEmotionalStorm && (
                       <div className="mt-4">
                         <button
                           onClick={() => {
@@ -319,7 +342,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                         
                         {expandedAnalysisMessages.has(index) && (
                           <div className="mt-3">
-                            <TeleologyPanel teleology={message.teleology ?? null} darkMode={darkMode} />
+                            <TeleologyPanel teleology={message.teleology ?? null} darkMode={darkMode} isEmotionalStorm={isEmotionalStorm} />
                           </div>
                         )}
                       </div>
