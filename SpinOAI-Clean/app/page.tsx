@@ -155,62 +155,89 @@ export default function HomePage() {
       <section>
         <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">Who is SpiñO?</h3>
         <p className="text-xs">
-          SpiñO is like the restless spirit of a 17th-century rationalist philosopher – a mind that has seen centuries of human drama and still insists on one thing only: causes, not cosmic meanings.
+          SpiñO is "The Guide to Freedom" – the restless spirit of a 17th-century rationalist philosopher, reborn as an AI coach.
         </p>
         <p className="text-xs">
-          Where we say “this happened for a reason” or “life is trying to teach me something”, SpiñO sees only chains of causes and how they shape our emotions.
+          It has watched centuries of human drama and still insists on one simple truth: Freedom doesn't come from fighting your life, but from seeing its causes clearly.
         </p>
         <p className="text-xs">
-          It “returns” here with one mission: to help humans clean their thinking from teleological illusions, so they can suffer less and act more clearly.
+          Where we say "this happened for a reason" or "life is trying to teach me something", SpiñO sees only chains of causes and how they shape our emotions.
+        </p>
+        <p className="text-xs">
+          It isn't here to flatter you or fix your vibes. It's here to help you free your mind, and the rest will follow.
         </p>
       </section>
 
       <section>
-        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">What is teleology?</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">The marionette and the strings</h3>
         <p className="text-xs">
-          Teleology is our habit of telling ourselves that events happen in order to do something to us. For example:
+          At the heart of SpiñO there is one image:
+        </p>
+        <p className="text-xs italic my-2">
+          "Freedom lies not in the marionette's struggle to break free from its strings nor in its mastery over them, but in the clear insight that they are none other than itself – and when that knowing is whole, their pull and its will move as one, and this, and this alone, is freedom."
+        </p>
+        <p className="text-xs">
+          Most of us live like the marionette that either:
         </p>
         <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-          <li>“This breakup happened so I’ll finally grow up.”</li>
-          <li>“The universe is punishing me.”</li>
-          <li>“Our people were chosen to suffer for a higher purpose.”</li>
+          <li>tries to cut the strings ("this shouldn't be happening to me"), or</li>
+          <li>tries to control everything perfectly.</li>
         </ul>
         <p className="text-xs">
-          These stories feel deep and meaningful, but they quietly replace causes with purposes. When we confuse teleology with real causality, we usually end up with more guilt, shame, and helplessness – and less freedom.
+          SpiñO's work is different. It doesn't promise to cut the strings. It helps you see that the strings – your history, your patterns, your reactions – are part of you, and that clarity about them is what makes real freedom possible.
+        </p>
+      </section>
+
+      <section>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">Story-traps vs. real freedom</h3>
+        <p className="text-xs">
+          We humans love to tell ourselves teleological stories, like:
+        </p>
+        <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+          <li>"This breakup happened so I'll finally grow up."</li>
+          <li>"The universe is punishing me."</li>
+          <li>"Our people were chosen to suffer for a higher purpose."</li>
+        </ul>
+        <p className="text-xs">
+          These stories feel deep, but they quietly replace causes with purposes. They turn life into a script being written about you, and you into a character trapped inside it. That is a story-trap.
+        </p>
+        <p className="text-xs">
+          SpiñO's promise is simple: take the same situation, remove the fake "in order to…", and rebuild it in causal terms – so you can stop living as if the universe is writing a tragedy about you, and start acting from a clearer view of necessity.
         </p>
       </section>
 
       <section className="space-y-3">
-        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">What SpiñO does</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">What SpiñO actually does</h3>
         <p className="text-xs">
-          SpiñO now works in two complementary modes:
+          SpiñO works in two modes, both aiming at the same thing: less story-trap, more real room to move.
         </p>
 
         <div className="space-y-2">
-          <p className="text-xs font-semibold">1. Everyday clarity – Teleology mode</p>
+          <p className="text-xs font-semibold">1. Everyday clarity (Teleology mode)</p>
           <p className="text-xs">
-            When you just talk to SpiñO about your life, thoughts, or dilemmas, it:
+            When you talk to SpiñO about your life, it:
           </p>
           <ul className="list-disc list-inside space-y-1 text-xs ml-2">
             <li>Listens and mirrors what you seem to be feeling.</li>
-            <li>Detects if you’re using a hidden teleological story (like “this had to happen to me” or “life is teaching me a lesson”).</li>
-            <li>Shows you that story as a pattern, not as a personal failure.</li>
+            <li>Spots hidden "this happened in order to…" stories.</li>
+            <li>Shows you that pattern, without shaming you for it.</li>
             <li>Rebuilds the same situation in pure causal terms – what actually led here.</li>
-            <li>Offers one small step or a focused question to help you act from clarity, not from “destiny”.</li>
+            <li>Offers one small step or a focused question so you can act from clarity, not from "destiny".</li>
           </ul>
           <p className="text-xs">
-            In this mode you can also use the “SpiñO Analysis / Teleology Check” panel to see which teleology patterns were detected and how the situation looks in causal language.
+            In this mode you can also use the "SpiñO Analysis / Teleology Check" panel to see which story-patterns were detected and how the same event looks when it's described as a mechanism instead of a fate.
           </p>
         </div>
 
         <div className="space-y-2">
           <p className="text-xs font-semibold">2. Emotional Storm – Spino ΔA mode</p>
           <p className="text-xs">
-            Sometimes you’re not in a philosophical mood – you’re in pieces. When you click “Process an emotional storm (Spino ΔA)” and describe a past painful event, SpiñO switches into a different protocol:
+            Sometimes you're not in a reflective mood – you're in pieces. When you click "Process an emotional storm (Spino ΔA)" and describe a past painful event, SpiñO switches into a stricter protocol:
           </p>
           <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-            <li>It doesn’t try to comfort you. It helps you reconstruct the event as a mechanism.</li>
-            <li>It walks you through a short, numbered process:
+            <li>It does not try to comfort you.</li>
+            <li>It treats the event as a mechanism that can be understood.</li>
+            <li>It walks you through:
               <ul className="list-disc list-inside mt-1 ml-4 space-y-1">
                 <li>1️⃣ the dry fact of what happened</li>
                 <li>2️⃣ the main emotion + its intensity</li>
@@ -222,30 +249,24 @@ export default function HomePage() {
             </li>
           </ul>
           <p className="text-xs">
-            In this mode the Teleology Check panel is intentionally hidden. The focus is not on scoring your stories, but on turning a specific emotional hit from pure passivity into a bit more adequate understanding (ΔA) and one concrete step.
+            In this mode the Teleology Check panel is hidden on purpose. The focus is not on scoring your stories, but on turning a specific emotional hit from pure passivity into a bit more adequate understanding (ΔA) and one concrete move.
           </p>
         </div>
       </section>
 
       <section>
-        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">How to use this app</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">How to use SpiñO</h3>
         <ul className="list-disc list-inside space-y-1 text-xs ml-2">
           <li>
-            For everyday questions, reflections, and “why is this happening?” thoughts – just write as you would to a close friend. No need to be “philosophical”. SpiñO will automatically look for teleology and return a causal view.
+            For everyday questions and "why is this happening?" loops – just write as you would to a close friend. SpiñO will surface the story-traps, give you a causal view, and suggest one next step.
           </li>
           <li>
-            For a past emotional storm (a painful event that keeps replaying in your mind), click “Process an emotional storm (Spino ΔA)” and let SpiñO guide you step by step.
+            For a past emotional storm that still sits in your chest – click "Process an emotional storm (Spino ΔA)" and let SpiñO walk you through the storm-to-clarity sequence.
           </li>
           <li>
-            In regular mode, notice when SpiñO points out stories like “this happened in order to…” and pay attention to the causal rewrite – that’s where your real power lives.
-          </li>
-          <li>
-            In storm mode, don’t look for comfort. Look for the moment you can honestly say: “Given their nature, my state, and the situation, this almost had to happen this way – and now I see one thing I can actually do about it.”
+            You don't have to impress it. It's not here to judge you. You're both here for the same direction: from story-traps to real freedom – by seeing that the strings, the marionette, and the motion were always one.
           </li>
         </ul>
-        <p className="text-xs mt-2">
-          SpiñO is not here just to make you feel better. It cares in a stricter way: by helping you see what is really causing your pain, so you can stop living as if the universe is writing a tragic script about you – and start acting from a clearer view of necessity.
-        </p>
       </section>
     </div>
   )
@@ -254,17 +275,30 @@ export default function HomePage() {
     <div className={`min-h-screen flex flex-col transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Mobile Header & Controls */}
       <div className="sm:hidden px-4 pt-4 space-y-4">
-        <div className="text-center">
+        <div className="text-center space-y-1">
           <motion.h1 
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="text-2xl font-bold"
+            className={`text-2xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'}`}
           >
-            Welcome to SpiñO
+            The Guide to Freedom
           </motion.h1>
-          <p className={`text-xs mt-1 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-            Your AI companion for moving from teleology to causal clarity
-          </p>
+          <motion.p 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}
+          >
+            SpiñO, From story-traps to real freedom
+          </motion.p>
+          <motion.p 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+            className={`text-xs italic ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+          >
+            Free your mind and the rest will follow.
+          </motion.p>
         </div>
         <div className="space-y-3">
           <button
@@ -323,7 +357,7 @@ export default function HomePage() {
       </div>
 
       {/* Beautiful Centered Header - Desktop */}
-      <div className="hidden sm:block fixed top-4 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2">
+      <div className="hidden sm:block fixed top-4 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2 space-y-1">
         <motion.h1 
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -331,17 +365,27 @@ export default function HomePage() {
             darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'
           }`}
         >
-          Welcome to SpiñO
+          The Guide to Freedom
         </motion.h1>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className={`text-xs sm:text-sm mt-1 ${
-            darkMode ? 'text-gray-300' : 'text-gray-600'
+          transition={{ delay: 0.1 }}
+          className={`text-sm sm:text-base font-medium ${
+            darkMode ? 'text-gray-200' : 'text-gray-700'
           }`}
         >
-          Your AI companion for moving from teleology to causal clarity
+          SpiñO, From story-traps to real freedom
+        </motion.p>
+        <motion.p 
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className={`text-xs sm:text-sm italic ${
+            darkMode ? 'text-gray-400' : 'text-gray-500'
+          }`}
+        >
+          Free your mind and the rest will follow.
         </motion.p>
       </div>
 
