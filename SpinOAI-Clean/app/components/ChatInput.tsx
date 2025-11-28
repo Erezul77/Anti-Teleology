@@ -78,7 +78,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
             <span className={helperTextClass}>
               {mode === "storm"
                 ? "Next message will trigger the post-event Spino ΔA module."
-                : "Click if you want to process a past emotional storm."}
+                : "Click if you want to process a current emotional storm."}
             </span>
           </div>
         </div>

@@ -298,7 +298,7 @@ export default function HomePage() {
             animate={{ opacity: 1, y: 0 }}
             className={`text-2xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'}`}
           >
-            The Guide to Freedom
+            SpiñO - The Guide to Freedom
           </motion.h1>
           <motion.p 
             initial={{ opacity: 0, y: -10 }}
@@ -306,7 +306,7 @@ export default function HomePage() {
             transition={{ delay: 0.1 }}
             className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}
           >
-            SpiñO – From story-traps to real freedom
+            From story-traps to real freedom
           </motion.p>
           <motion.p 
             initial={{ opacity: 0, y: -10 }}
@@ -314,7 +314,7 @@ export default function HomePage() {
             transition={{ delay: 0.2 }}
             className={`text-xs italic ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
           >
-            Free your mind and the rest will follow.
+            "Free your mind and the rest will follow..."
           </motion.p>
         </div>
         <div className="space-y-3">
@@ -382,7 +382,7 @@ export default function HomePage() {
             darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'
           }`}
         >
-          The Guide to Freedom
+          SpiñO - The Guide to Freedom
         </motion.h1>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -392,7 +392,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-200' : 'text-gray-700'
           }`}
         >
-          SpiñO – From story-traps to real freedom
+          From story-traps to real freedom
         </motion.p>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -402,7 +402,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-400' : 'text-gray-500'
           }`}
         >
-          Free your mind and the rest will follow.
+          "Free your mind and the rest will follow..."
         </motion.p>
       </div>
 
