@@ -207,72 +207,89 @@ export default function HomePage() {
       </section>
 
       <section className="space-y-3">
-        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">What SpiñO actually does</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">Two ways to talk to SpiñO</h3>
         <p className="text-xs">
-          SpiñO works in two modes, both aiming at the same thing: less story-trap, more real room to move.
+          SpiñO has one job: Take you from story-traps to real freedom, by showing you what is actually causing your pain and what you can do next.
+        </p>
+        <p className="text-xs">
+          You can use it in two simple ways:
         </p>
 
         <div className="space-y-2">
-          <p className="text-xs font-semibold">1. Everyday clarity (Teleology mode)</p>
+          <p className="text-xs font-semibold">1. Just talk (everyday freedom)</p>
           <p className="text-xs">
-            When you talk to SpiñO about your life, it:
+            This is the default. You type to SpiñO like you would to a close friend:
           </p>
           <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-            <li>Listens and mirrors what you seem to be feeling.</li>
-            <li>Spots hidden "this happened in order to…" stories.</li>
-            <li>Shows you that pattern, without shaming you for it.</li>
-            <li>Rebuilds the same situation in pure causal terms – what actually led here.</li>
-            <li>Offers one small step or a focused question so you can act from clarity, not from "destiny".</li>
+            <li>what happened</li>
+            <li>what you're thinking about</li>
+            <li>where you feel stuck</li>
           </ul>
           <p className="text-xs">
-            In this mode you can also use the "SpiñO Analysis / Teleology Check" panel to see which story-patterns were detected and how the same event looks when it's described as a mechanism instead of a fate.
+            SpiñO will:
+          </p>
+          <ul className="list-disc list-inside space-y-1 text-xs ml-2">
+            <li>mirror what you seem to be feeling</li>
+            <li>spot hidden "this happened in order to…" stories</li>
+            <li>show you that pattern, without shaming you for it</li>
+            <li>rebuild the same situation in pure causal terms – what actually led here</li>
+            <li>offer one small, realistic step so you can act from clarity, not from destiny</li>
+          </ul>
+          <p className="text-xs">
+            When you want to go deeper, you can open the "SpiñO Analysis / Teleology Check" panel to see which story-patterns were detected and how the event looks in causal language.
+          </p>
+          <p className="text-xs">
+            You don't have to choose a mode for this. Just start typing and SpiñO does the rest.
           </p>
         </div>
 
         <div className="space-y-2">
-          <p className="text-xs font-semibold">2. Emotional Storm – Spino ΔA mode</p>
+          <p className="text-xs font-semibold">2. Process a storm (Spino ΔA)</p>
           <p className="text-xs">
-            Sometimes you're not in a reflective mood – you're in pieces. When you click "Process an emotional storm (Spino ΔA)" and describe a past painful event, SpiñO switches into a stricter protocol:
+            This is for one specific past event that still hits you hard. If there's a scene that keeps replaying in your head – an argument, betrayal, humiliation, loss – click:
+          </p>
+          <p className="text-xs font-medium ml-2">
+            "Process an emotional storm (Spino ΔA)"
+          </p>
+          <p className="text-xs">
+            and then write what happened.
+          </p>
+          <p className="text-xs">
+            In this "storm" flow, SpiñO will:
           </p>
           <ul className="list-disc list-inside space-y-1 text-xs ml-2">
-            <li>It does not try to comfort you.</li>
-            <li>It treats the event as a mechanism that can be understood.</li>
-            <li>It walks you through:
-              <ul className="list-disc list-inside mt-1 ml-4 space-y-1">
-                <li>1️⃣ the dry fact of what happened</li>
-                <li>2️⃣ the main emotion + its intensity</li>
-                <li>3️⃣ the hidden sentence that glues the pain to your sense of self</li>
-                <li>4️⃣ the natural mechanism: your nature, their nature, and the situation</li>
-                <li>5️⃣ a small ΔA – what is now clearer than before</li>
-                <li>6️⃣ one small action (or a conscious decision not to act yet)</li>
-              </ul>
-            </li>
+            <li>1️⃣ ask for one dry sentence of what happened</li>
+            <li>2️⃣ ask for the main emotion + intensity (1–10)</li>
+            <li>3️⃣ find the hidden sentence that ties the pain to your sense of self</li>
+            <li>4️⃣ reconstruct the event as a natural mechanism (your nature, their nature, and the situation)</li>
+            <li>5️⃣ ask what is now clearer than before (ΔA – a small gain in adequacy)</li>
+            <li>6️⃣ help you choose one small action – or a conscious decision not to act yet</li>
           </ul>
           <p className="text-xs">
-            In this mode the Teleology Check panel is hidden on purpose. The focus is not on scoring your stories, but on turning a specific emotional hit from pure passivity into a bit more adequate understanding (ΔA) and one concrete move.
+            In storm mode the Teleology Check panel is hidden on purpose. Here the point is not analysis, but turning a sharp emotional hit from pure passivity into a bit more understanding and one concrete move.
           </p>
         </div>
       </section>
 
       <section>
-        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">How to use SpiñO</h3>
+        <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">How to choose</h3>
         <ul className="list-disc list-inside space-y-1 text-xs ml-2">
           <li>
-            For everyday questions and "why is this happening?" loops – just write as you would to a close friend. SpiñO will surface the story-traps, give you a causal view, and suggest one next step.
+            If you just feel confused, stuck, or curious → just start talking.
           </li>
           <li>
-            For a past emotional storm that still sits in your chest – click "Process an emotional storm (Spino ΔA)" and let SpiñO walk you through the storm-to-clarity sequence.
-          </li>
-          <li>
-            You don't have to impress it. It's not here to judge you. You're both here for the same direction: from story-traps to real freedom – by seeing that the strings, the marionette, and the motion were always one.
+            If there's one specific event that still burns in your chest → click "Process an emotional storm (Spino ΔA)" and let SpiñO walk you through it.
           </li>
         </ul>
+        <p className="text-xs mt-2">
+          You don't have to impress it. It's not here to judge you. You're both here for the same direction: from story-traps to real freedom – by seeing that the strings, the marionette, and the motion were always one.
+        </p>
       </section>
     </div>
   )
 
   return (
-    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
+    <div className={`h-screen flex flex-col overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Mobile Header & Controls */}
       <div className="sm:hidden px-4 pt-4 space-y-4">
         <div className="text-center space-y-1">
@@ -281,7 +298,7 @@ export default function HomePage() {
             animate={{ opacity: 1, y: 0 }}
             className={`text-2xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'}`}
           >
-            SpiñO - The Guide to Freedom
+            The Guide to Freedom
           </motion.h1>
           <motion.p 
             initial={{ opacity: 0, y: -10 }}
@@ -289,7 +306,7 @@ export default function HomePage() {
             transition={{ delay: 0.1 }}
             className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}
           >
-            From story-traps to real freedom
+            SpiñO – From story-traps to real freedom
           </motion.p>
           <motion.p 
             initial={{ opacity: 0, y: -10 }}
@@ -297,7 +314,7 @@ export default function HomePage() {
             transition={{ delay: 0.2 }}
             className={`text-xs italic ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
           >
-            "Free your mind and the rest will follow..."
+            Free your mind and the rest will follow.
           </motion.p>
         </div>
         <div className="space-y-3">
@@ -365,7 +382,7 @@ export default function HomePage() {
             darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'
           }`}
         >
-          SpiñO - The Guide to Freedom
+          The Guide to Freedom
         </motion.h1>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -375,7 +392,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-200' : 'text-gray-700'
           }`}
         >
-          From story-traps to real freedom
+          SpiñO – From story-traps to real freedom
         </motion.p>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -385,7 +402,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-400' : 'text-gray-500'
           }`}
         >
-          "Free your mind and the rest will follow..."
+          Free your mind and the rest will follow.
         </motion.p>
       </div>
 
@@ -455,14 +472,14 @@ export default function HomePage() {
       </div>
 
       {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
-      <div className="flex-1 flex flex-col lg:flex-row pt-4 sm:pt-10 lg:pt-6 lg:overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row pt-4 sm:pt-10 lg:pt-6 overflow-hidden min-h-0">
         {/* Main Chat Area */}
-        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6 lg:overflow-hidden">
+        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6 overflow-hidden">
           <UnifiedChatBox messages={messages} setMessages={setMessages} darkMode={darkMode} language={language} sessionMode={sessionMode} />
         </div>
 
         {/* Sidebar - Hidden on mobile, shown on desktop */}
-        <div className={`hidden lg:block w-80 p-4 space-y-4 flex-shrink-0 overflow-y-auto h-full ${
+        <div className={`hidden lg:block w-80 p-4 space-y-4 flex-shrink-0 overflow-y-auto min-h-0 ${
           darkMode 
             ? 'bg-white/5 border-l border-white/10' 
             : 'bg-black/5 border-l border-black/10'
