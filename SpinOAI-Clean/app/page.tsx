@@ -281,7 +281,7 @@ export default function HomePage() {
             animate={{ opacity: 1, y: 0 }}
             className={`text-2xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'}`}
           >
-            The Guide to Freedom
+            SpiñO - The Guide to Freedom
           </motion.h1>
           <motion.p 
             initial={{ opacity: 0, y: -10 }}
@@ -289,7 +289,7 @@ export default function HomePage() {
             transition={{ delay: 0.1 }}
             className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}
           >
-            SpiñO, From story-traps to real freedom
+            From story-traps to real freedom
           </motion.p>
           <motion.p 
             initial={{ opacity: 0, y: -10 }}
@@ -297,7 +297,7 @@ export default function HomePage() {
             transition={{ delay: 0.2 }}
             className={`text-xs italic ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
           >
-            Free your mind and the rest will follow.
+            "Free your mind and the rest will follow..."
           </motion.p>
         </div>
         <div className="space-y-3">
@@ -365,7 +365,7 @@ export default function HomePage() {
             darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'
           }`}
         >
-          The Guide to Freedom
+          SpiñO - The Guide to Freedom
         </motion.h1>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -375,7 +375,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-200' : 'text-gray-700'
           }`}
         >
-          SpiñO, From story-traps to real freedom
+          From story-traps to real freedom
         </motion.p>
         <motion.p 
           initial={{ opacity: 0, y: -10 }}
@@ -385,7 +385,7 @@ export default function HomePage() {
             darkMode ? 'text-gray-400' : 'text-gray-500'
           }`}
         >
-          Free your mind and the rest will follow.
+          "Free your mind and the rest will follow..."
         </motion.p>
       </div>
 
@@ -457,12 +457,12 @@ export default function HomePage() {
       {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
       <div className="flex-1 flex flex-col lg:flex-row pt-4 sm:pt-10 lg:pt-6 lg:overflow-hidden">
         {/* Main Chat Area */}
-        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6">
+        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6 lg:overflow-hidden">
           <UnifiedChatBox messages={messages} setMessages={setMessages} darkMode={darkMode} language={language} sessionMode={sessionMode} />
         </div>
 
         {/* Sidebar - Hidden on mobile, shown on desktop */}
-        <div className={`hidden lg:block w-80 p-4 space-y-4 flex-shrink-0 overflow-y-auto ${
+        <div className={`hidden lg:block w-80 p-4 space-y-4 flex-shrink-0 overflow-y-auto h-full ${
           darkMode 
             ? 'bg-white/5 border-l border-white/10' 
             : 'bg-black/5 border-l border-black/10'
