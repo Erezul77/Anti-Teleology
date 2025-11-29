@@ -488,8 +488,8 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* About SpiñO Button - Desktop (Right side) */}
-      <div className="hidden sm:block fixed top-4 right-4 z-30">
+      {/* About SpiñO Button - Desktop (Right side of header, mirroring Instructions) */}
+      <div className="hidden sm:block fixed top-4 left-1/2 lg:left-[calc((100vw-320px)/2+200px)] transform -translate-x-1/2 lg:translate-x-0 z-30">
         <button
           onClick={() => setShowAbout(!showAbout)}
           className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
@@ -519,7 +519,7 @@ export default function HomePage() {
       </div>
 
       {/* Dark Mode Toggle - Desktop */}
-      <div className="hidden sm:flex fixed top-16 right-4 z-30 gap-2">
+      <div className="hidden sm:flex fixed top-4 right-4 z-30 gap-2">
         <select 
           value={language} 
           onChange={(e) => setLanguage(e.target.value)}
