@@ -440,7 +440,7 @@ export default function HomePage() {
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className={`text-sm sm:text-base font-medium ${
+          className={`text-base sm:text-lg font-medium ${
             darkMode ? 'text-gray-200' : 'text-gray-700'
           }`}
         >
@@ -489,7 +489,7 @@ export default function HomePage() {
       </div>
 
       {/* About SpiñO Button - Desktop (Next to Instructions) */}
-      <div className="hidden sm:block fixed top-8 left-32 z-30">
+      <div className="hidden sm:block fixed top-8 left-40 z-30">
         <button
           onClick={() => setShowAbout(!showAbout)}
           className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
@@ -519,11 +519,11 @@ export default function HomePage() {
       </div>
 
       {/* Language & Dark Mode Toggle - Desktop (Right side of header) */}
-      <div className="hidden sm:flex fixed top-8 left-1/2 lg:left-[calc((100vw-320px)/2+200px)] transform -translate-x-1/2 lg:translate-x-0 z-30 gap-2">
+      <div className="hidden sm:flex fixed top-8 left-1/2 lg:left-[calc((100vw-320px)/2+200px+3rem)] transform -translate-x-1/2 lg:translate-x-0 z-30 gap-2">
         <select 
           value={language} 
           onChange={(e) => setLanguage(e.target.value)}
-          className={`px-2 py-1 sm:px-3 sm:py-2 rounded-lg border text-xs sm:text-sm font-medium shadow-lg ${
+          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border text-xs font-medium shadow-lg ${
             darkMode 
               ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
               : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
@@ -543,7 +543,7 @@ export default function HomePage() {
         </select>
         <button
           onClick={toggleDarkMode}
-          className={`p-2 sm:p-3 rounded-lg border shadow-lg transition-colors ${
+          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-colors ${
             darkMode 
               ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
               : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
