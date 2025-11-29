@@ -389,6 +389,16 @@ export default function HomePage() {
               {aboutBody}
             </div>
           )}
+          <Link
+            href="/privacy"
+            className={`w-full px-3 py-2 rounded-lg border text-xs font-medium transition-all duration-200 text-center ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+            }`}
+          >
+            🔒 Privacy Policy
+          </Link>
           <div className="flex flex-wrap gap-2">
             <select 
               value={language} 
@@ -425,8 +435,116 @@ export default function HomePage() {
         </div>
       </div>
 
+      {/* Top Navigation Bar - Desktop */}
+      <div className="hidden sm:flex fixed top-4 left-4 right-4 z-30 items-center justify-between gap-4">
+        {/* Left side: Instructions, About, Privacy */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowInstructions(!showInstructions)}
+            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+            }`}
+          >
+            {showInstructions ? '✕' : 'ℹ️ Instructions'}
+          </button>
+          
+          <button
+            onClick={() => setShowAbout(!showAbout)}
+            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+            }`}
+          >
+            {showAbout ? '✕' : 'ℹ️ About'}
+          </button>
+
+          <Link
+            href="/privacy"
+            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+            }`}
+          >
+            🔒 Privacy
+          </Link>
+        </div>
+
+        {/* Right side: Language & Dark Mode */}
+        <div className="flex items-center gap-2">
+          <select 
+            value={language} 
+            onChange={(e) => setLanguage(e.target.value)}
+            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border text-xs font-medium shadow-lg ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+            } transition-colors`}
+          >
+            <option value="en">English</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="it">Italiano</option>
+            <option value="pt">Português</option>
+            <option value="ru">Русский</option>
+            <option value="zh">中文</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="he">עברית</option>
+          </select>
+          <button
+            onClick={toggleDarkMode}
+            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-colors ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+            }`}
+          >
+            {darkMode ? <Sun className="w-4 h-4 sm:w-5 sm:h-5" /> : <Moon className="w-4 h-4 sm:w-5 sm:h-5" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Instructions Dropdown - Desktop */}
+      {showInstructions && (
+        <motion.div
+          initial={{ opacity: 0, y: -10, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -10, scale: 0.95 }}
+          className={`hidden sm:block fixed top-16 left-4 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm z-30 ${
+            darkMode 
+              ? 'bg-gray-900/95 border-gray-600 text-white' 
+              : 'bg-white/95 border-gray-300 text-gray-900'
+          }`}
+        >
+          <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
+          {instructionsBody}
+        </motion.div>
+      )}
+
+      {/* About Dropdown - Desktop */}
+      {showAbout && (
+        <motion.div
+          initial={{ opacity: 0, y: -10, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -10, scale: 0.95 }}
+          className={`hidden sm:block fixed top-16 left-4 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm z-30 ${
+            darkMode 
+              ? 'bg-gray-900/95 border-gray-600 text-white' 
+              : 'bg-white/95 border-gray-300 text-gray-900'
+          }`}
+        >
+          <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
+          {aboutBody}
+        </motion.div>
+      )}
+
       {/* Beautiful Centered Header - Desktop */}
-      <div className="hidden sm:block fixed top-8 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2 space-y-1">
+      <div className="hidden sm:block fixed top-24 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2 space-y-1">
         <motion.h1 
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -458,100 +576,6 @@ export default function HomePage() {
         </motion.p>
       </div>
 
-      {/* Small Collapsible Instructions Button - Desktop */}
-      <div className="hidden sm:block fixed top-8 left-4 z-30">
-        <button
-          onClick={() => setShowInstructions(!showInstructions)}
-          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
-            darkMode 
-              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
-              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-          }`}
-        >
-          {showInstructions ? '✕' : 'ℹ️ Instructions'}
-        </button>
-        
-        {showInstructions && (
-          <motion.div
-            initial={{ opacity: 0, y: -10, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            className={`absolute top-12 left-0 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
-              darkMode 
-                ? 'bg-gray-900/95 border-gray-600 text-white' 
-                : 'bg-white/95 border-gray-300 text-gray-900'
-            }`}
-          >
-            <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
-            {instructionsBody}
-          </motion.div>
-        )}
-      </div>
-
-      {/* About SpiñO Button - Desktop (Next to Instructions) */}
-      <div className="hidden sm:block fixed top-8 left-40 z-30">
-        <button
-          onClick={() => setShowAbout(!showAbout)}
-          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
-            darkMode 
-              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
-              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-          }`}
-        >
-          {showAbout ? '✕' : 'ℹ️ About'}
-        </button>
-        
-        {showAbout && (
-          <motion.div
-            initial={{ opacity: 0, y: -10, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            className={`absolute top-12 left-0 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
-              darkMode 
-                ? 'bg-gray-900/95 border-gray-600 text-white' 
-                : 'bg-white/95 border-gray-300 text-gray-900'
-            }`}
-          >
-            <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
-            {aboutBody}
-          </motion.div>
-        )}
-      </div>
-
-      {/* Language & Dark Mode Toggle - Desktop (Right side of header) */}
-      <div className="hidden sm:flex fixed top-8 left-1/2 lg:left-[calc((100vw-320px)/2+200px+3rem)] transform -translate-x-1/2 lg:translate-x-0 z-30 gap-2">
-        <select 
-          value={language} 
-          onChange={(e) => setLanguage(e.target.value)}
-          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border text-xs font-medium shadow-lg ${
-            darkMode 
-              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
-              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-          } transition-colors`}
-        >
-          <option value="en">English</option>
-          <option value="es">Español</option>
-          <option value="fr">Français</option>
-          <option value="de">Deutsch</option>
-          <option value="it">Italiano</option>
-          <option value="pt">Português</option>
-          <option value="ru">Русский</option>
-          <option value="zh">中文</option>
-          <option value="ja">日本語</option>
-          <option value="ko">한국어</option>
-          <option value="he">עברית</option>
-        </select>
-        <button
-          onClick={toggleDarkMode}
-          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-colors ${
-            darkMode 
-              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
-              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-          }`}
-        >
-          {darkMode ? <Sun className="w-4 h-4 sm:w-5 sm:h-5" /> : <Moon className="w-4 h-4 sm:w-5 sm:h-5" />}
-        </button>
-      </div>
 
       {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
       <div className="flex-1 flex flex-col lg:flex-row pt-4 sm:pt-10 lg:pt-6 overflow-hidden min-h-0">
