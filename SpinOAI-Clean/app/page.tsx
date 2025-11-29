@@ -473,40 +473,6 @@ export default function HomePage() {
           </Link>
         </div>
 
-        {/* Right side: Language & Dark Mode */}
-        <div className="flex items-center gap-2">
-          <select 
-            value={language} 
-            onChange={(e) => setLanguage(e.target.value)}
-            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border text-xs font-medium shadow-lg ${
-              darkMode 
-                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
-                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-            } transition-colors`}
-          >
-            <option value="en">English</option>
-            <option value="es">Español</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-            <option value="it">Italiano</option>
-            <option value="pt">Português</option>
-            <option value="ru">Русский</option>
-            <option value="zh">中文</option>
-            <option value="ja">日本語</option>
-            <option value="ko">한국어</option>
-            <option value="he">עברית</option>
-          </select>
-          <button
-            onClick={toggleDarkMode}
-            className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-colors ${
-              darkMode 
-                ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
-                : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-            }`}
-          >
-            {darkMode ? <Sun className="w-4 h-4 sm:w-5 sm:h-5" /> : <Moon className="w-4 h-4 sm:w-5 sm:h-5" />}
-          </button>
-        </div>
       </div>
 
       {/* Instructions Dropdown - Desktop */}
@@ -590,6 +556,50 @@ export default function HomePage() {
             ? 'bg-white/5 border-l border-white/10' 
             : 'bg-black/5 border-l border-black/10'
         }`}>
+          {/* Language & Dark Mode Controls */}
+          <div className={`rounded-lg p-3 ${
+            darkMode 
+              ? 'bg-white/5 border border-white/10' 
+              : 'bg-black/5 border border-black/10'
+          }`}>
+            <h3 className={`text-sm font-medium mb-2 ${darkMode ? 'text-white' : 'text-black'}`}>
+              Settings
+            </h3>
+            <div className="flex items-center gap-2">
+              <select 
+                value={language} 
+                onChange={(e) => setLanguage(e.target.value)}
+                className={`flex-1 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border text-xs font-medium ${
+                  darkMode 
+                    ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                    : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                } transition-colors`}
+              >
+                <option value="en">English</option>
+                <option value="es">Español</option>
+                <option value="fr">Français</option>
+                <option value="de">Deutsch</option>
+                <option value="it">Italiano</option>
+                <option value="pt">Português</option>
+                <option value="ru">Русский</option>
+                <option value="zh">中文</option>
+                <option value="ja">日本語</option>
+                <option value="ko">한국어</option>
+                <option value="he">עברית</option>
+              </select>
+              <button
+                onClick={toggleDarkMode}
+                className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border text-xs font-medium transition-colors ${
+                  darkMode 
+                    ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                    : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                }`}
+              >
+                {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
           {/* Session Management */}
           <div className={`rounded-lg p-3 ${
             darkMode 
