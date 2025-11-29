@@ -59,6 +59,7 @@ export default function HomePage() {
   const [language, setLanguage] = useState('en')
   const [sessionMode] = useState<'coaching'>('coaching')
   const [showInstructions, setShowInstructions] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
 
   const handleSaveSession = async () => {
     if (messages.length === 0) {
@@ -288,8 +289,39 @@ export default function HomePage() {
     </div>
   )
 
+  const aboutBody = (
+    <div className="space-y-4 text-sm leading-relaxed">
+      <p className={`${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+        SpiñO is a serious tool for emotional work and philosophical clarity, inspired by Spinoza's
+        way of seeing emotions through causes rather than destiny. It is not meant to be a casual
+        gadget or an endless chat toy, but a focused space where you can examine what hurts,
+        understand why, and increase your freedom to act.
+      </p>
+
+      <h3 className="text-lg font-semibold mt-6 mb-3">How SpiñO is sustained</h3>
+      <p className={`${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+        Every reflection you write and every response you receive runs on top of real AI
+        infrastructure. That compute has a direct cost. There is no such thing as unlimited
+        "free AI" – someone always pays the bill.
+      </p>
+      <p className={`${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+        We prefer to be honest about this. Instead of funding SpiñO with ads, selling your data,
+        or designing tricks to keep you hooked, we chose a direct and simple model:
+      </p>
+      <ul className={`list-disc list-inside space-y-1 ml-4 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+        <li>Paid access to the mobile app (and in the future, Pro options for very heavy use).</li>
+        <li>Respectful, fair use of the web version – focused sessions, not endless daily chatting.</li>
+      </ul>
+      <p className={`${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+        If SpiñO becomes part of your regular emotional practice or thinking, supporting it
+        financially helps keep it independent and aligned with its purpose: more clarity, less
+        illusion, and no hidden business model behind your back.
+      </p>
+    </div>
+  )
+
   return (
-    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
+    <div className={`h-screen flex flex-col overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Mobile Header & Controls */}
       <div className="sm:hidden px-4 pt-4 space-y-4">
         <div className="text-center space-y-1">
@@ -335,6 +367,26 @@ export default function HomePage() {
                 : 'bg-white/95 border-gray-300 text-gray-900'
             }`}>
               {instructionsBody}
+            </div>
+          )}
+          <button
+            onClick={() => setShowAbout(!showAbout)}
+            className={`w-full px-3 py-2 rounded-lg border text-xs font-medium transition-all duration-200 ${
+              darkMode 
+                ? 'bg-gray-800 border-gray-600 text-white' 
+                : 'bg-white border-gray-300 text-gray-900'
+            }`}
+          >
+            {showAbout ? 'Hide About' : 'About SpiñO'}
+          </button>
+          {showAbout && (
+            <div className={`rounded-lg border p-3 max-h-[60vh] overflow-y-auto ${
+              darkMode 
+                ? 'bg-gray-900/95 border-gray-600 text-white' 
+                : 'bg-white/95 border-gray-300 text-gray-900'
+            }`}>
+              <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
+              {aboutBody}
             </div>
           )}
           <div className="flex flex-wrap gap-2">
@@ -436,8 +488,38 @@ export default function HomePage() {
         )}
       </div>
 
+      {/* About SpiñO Button - Desktop (Right side) */}
+      <div className="hidden sm:block fixed top-4 right-4 z-30">
+        <button
+          onClick={() => setShowAbout(!showAbout)}
+          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
+            darkMode 
+              ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+              : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+          }`}
+        >
+          {showAbout ? '✕' : 'ℹ️ About'}
+        </button>
+        
+        {showAbout && (
+          <motion.div
+            initial={{ opacity: 0, y: -10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.95 }}
+            className={`absolute top-12 right-0 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
+              darkMode 
+                ? 'bg-gray-900/95 border-gray-600 text-white' 
+                : 'bg-white/95 border-gray-300 text-gray-900'
+            }`}
+          >
+            <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
+            {aboutBody}
+          </motion.div>
+        )}
+      </div>
+
       {/* Dark Mode Toggle - Desktop */}
-      <div className="hidden sm:flex fixed top-4 right-4 z-30 gap-2">
+      <div className="hidden sm:flex fixed top-16 right-4 z-30 gap-2">
         <select 
           value={language} 
           onChange={(e) => setLanguage(e.target.value)}
@@ -523,39 +605,6 @@ export default function HomePage() {
         </div>
         
       </div>
-
-      {/* About SpiñO / Support Section */}
-      <section id="about-spino" className={`mt-16 border-t ${darkMode ? 'border-white/10' : 'border-black/10'} pt-10 pb-16`}>
-        <div className="mx-auto max-w-3xl px-4 sm:px-6">
-          <h2 className="text-2xl font-semibold mb-4">About SpiñO</h2>
-          <p className={`mb-4 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-            SpiñO is a serious tool for emotional work and philosophical clarity, inspired by Spinoza's
-            way of seeing emotions through causes rather than destiny. It is not meant to be a casual
-            gadget or an endless chat toy, but a focused space where you can examine what hurts,
-            understand why, and increase your freedom to act.
-          </p>
-
-          <h3 className="text-xl font-semibold mt-6 mb-3">How SpiñO is sustained</h3>
-          <p className={`mb-3 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-            Every reflection you write and every response you receive runs on top of real AI
-            infrastructure. That compute has a direct cost. There is no such thing as unlimited
-            "free AI" – someone always pays the bill.
-          </p>
-          <p className={`mb-3 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-            We prefer to be honest about this. Instead of funding SpiñO with ads, selling your data,
-            or designing tricks to keep you hooked, we chose a direct and simple model:
-          </p>
-          <ul className={`list-disc list-inside space-y-1 mb-3 ml-4 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-            <li>Paid access to the mobile app (and in the future, Pro options for very heavy use).</li>
-            <li>Respectful, fair use of the web version – focused sessions, not endless daily chatting.</li>
-          </ul>
-          <p className={`mb-3 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-            If SpiñO becomes part of your regular emotional practice or thinking, supporting it
-            financially helps keep it independent and aligned with its purpose: more clarity, less
-            illusion, and no hidden business model behind your back.
-          </p>
-        </div>
-      </section>
     </div>
   )
 }
