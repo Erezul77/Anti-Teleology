@@ -289,7 +289,7 @@ export default function HomePage() {
   )
 
   return (
-    <div className={`h-screen flex flex-col overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
+    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Mobile Header & Controls */}
       <div className="sm:hidden px-4 pt-4 space-y-4">
         <div className="text-center space-y-1">
@@ -523,6 +523,39 @@ export default function HomePage() {
         </div>
         
       </div>
+
+      {/* About SpiñO / Support Section */}
+      <section id="about-spino" className={`mt-16 border-t ${darkMode ? 'border-white/10' : 'border-black/10'} pt-10 pb-16`}>
+        <div className="mx-auto max-w-3xl px-4 sm:px-6">
+          <h2 className="text-2xl font-semibold mb-4">About SpiñO</h2>
+          <p className={`mb-4 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+            SpiñO is a serious tool for emotional work and philosophical clarity, inspired by Spinoza's
+            way of seeing emotions through causes rather than destiny. It is not meant to be a casual
+            gadget or an endless chat toy, but a focused space where you can examine what hurts,
+            understand why, and increase your freedom to act.
+          </p>
+
+          <h3 className="text-xl font-semibold mt-6 mb-3">How SpiñO is sustained</h3>
+          <p className={`mb-3 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+            Every reflection you write and every response you receive runs on top of real AI
+            infrastructure. That compute has a direct cost. There is no such thing as unlimited
+            "free AI" – someone always pays the bill.
+          </p>
+          <p className={`mb-3 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+            We prefer to be honest about this. Instead of funding SpiñO with ads, selling your data,
+            or designing tricks to keep you hooked, we chose a direct and simple model:
+          </p>
+          <ul className={`list-disc list-inside space-y-1 mb-3 ml-4 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+            <li>Paid access to the mobile app (and in the future, Pro options for very heavy use).</li>
+            <li>Respectful, fair use of the web version – focused sessions, not endless daily chatting.</li>
+          </ul>
+          <p className={`mb-3 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+            If SpiñO becomes part of your regular emotional practice or thinking, supporting it
+            financially helps keep it independent and aligned with its purpose: more clarity, less
+            illusion, and no hidden business model behind your back.
+          </p>
+        </div>
+      </section>
     </div>
   )
 }
