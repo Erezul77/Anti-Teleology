@@ -323,7 +323,7 @@ export default function HomePage() {
   return (
     <div className={`h-screen flex flex-col overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Mobile Header & Controls */}
-      <div className="sm:hidden px-4 pt-4 space-y-4">
+      <div className="sm:hidden px-4 pt-6 space-y-4">
         <div className="text-center space-y-1">
           <motion.h1 
             initial={{ opacity: 0, y: -20 }}
@@ -426,7 +426,7 @@ export default function HomePage() {
       </div>
 
       {/* Beautiful Centered Header - Desktop */}
-      <div className="hidden sm:block fixed top-4 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2 space-y-1">
+      <div className="hidden sm:block fixed top-8 left-1/2 lg:left-[calc((100vw-320px)/2)] transform -translate-x-1/2 z-40 text-center px-2 space-y-1">
         <motion.h1 
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -459,7 +459,7 @@ export default function HomePage() {
       </div>
 
       {/* Small Collapsible Instructions Button - Desktop */}
-      <div className="hidden sm:block fixed top-4 left-4 z-30">
+      <div className="hidden sm:block fixed top-8 left-4 z-30">
         <button
           onClick={() => setShowInstructions(!showInstructions)}
           className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
@@ -488,8 +488,8 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* About SpiñO Button - Desktop (Right side of header, mirroring Instructions) */}
-      <div className="hidden sm:block fixed top-4 left-1/2 lg:left-[calc((100vw-320px)/2+200px)] transform -translate-x-1/2 lg:translate-x-0 z-30">
+      {/* About SpiñO Button - Desktop (Next to Instructions) */}
+      <div className="hidden sm:block fixed top-8 left-32 z-30">
         <button
           onClick={() => setShowAbout(!showAbout)}
           className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border shadow-lg transition-all duration-200 text-xs font-medium hover:scale-105 ${
@@ -506,7 +506,7 @@ export default function HomePage() {
             initial={{ opacity: 0, y: -10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -10, scale: 0.95 }}
-            className={`absolute top-12 right-0 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
+            className={`absolute top-12 left-0 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm ${
               darkMode 
                 ? 'bg-gray-900/95 border-gray-600 text-white' 
                 : 'bg-white/95 border-gray-300 text-gray-900'
@@ -518,8 +518,8 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* Dark Mode Toggle - Desktop */}
-      <div className="hidden sm:flex fixed top-4 right-4 z-30 gap-2">
+      {/* Language & Dark Mode Toggle - Desktop (Right side of header) */}
+      <div className="hidden sm:flex fixed top-8 left-1/2 lg:left-[calc((100vw-320px)/2+200px)] transform -translate-x-1/2 lg:translate-x-0 z-30 gap-2">
         <select 
           value={language} 
           onChange={(e) => setLanguage(e.target.value)}
