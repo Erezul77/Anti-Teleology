@@ -361,12 +361,25 @@ export default function HomePage() {
             {showInstructions ? 'Hide instructions' : 'Instructions'}
           </button>
           {showInstructions && (
-            <div className={`rounded-lg border p-3 max-h-[60vh] overflow-y-auto ${
-              darkMode 
-                ? 'bg-gray-900/95 border-gray-600 text-white' 
-                : 'bg-white/95 border-gray-300 text-gray-900'
+            <div className={`fixed inset-0 bg-black z-50 overflow-y-auto p-4 ${
+              darkMode ? 'text-gray-100' : 'text-gray-900'
             }`}>
-              {instructionsBody}
+              <div className="flex justify-between items-center mb-6">
+                <h1 className="text-2xl font-semibold">Instructions</h1>
+                <button
+                  onClick={() => setShowInstructions(false)}
+                  className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
+                    darkMode 
+                      ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                      : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                  }`}
+                >
+                  ✕ Close
+                </button>
+              </div>
+              <div className="space-y-4 text-sm leading-relaxed">
+                {instructionsBody}
+              </div>
             </div>
           )}
           <button
@@ -380,13 +393,25 @@ export default function HomePage() {
             {showAbout ? 'Hide About' : 'About SpiñO'}
           </button>
           {showAbout && (
-            <div className={`rounded-lg border p-3 max-h-[60vh] overflow-y-auto ${
-              darkMode 
-                ? 'bg-gray-900/95 border-gray-600 text-white' 
-                : 'bg-white/95 border-gray-300 text-gray-900'
+            <div className={`fixed inset-0 bg-black z-50 overflow-y-auto p-4 ${
+              darkMode ? 'text-gray-100' : 'text-gray-900'
             }`}>
-              <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
-              {aboutBody}
+              <div className="flex justify-between items-center mb-6">
+                <h1 className="text-2xl font-semibold">About SpiñO</h1>
+                <button
+                  onClick={() => setShowAbout(false)}
+                  className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
+                    darkMode 
+                      ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                      : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                  }`}
+                >
+                  ✕ Close
+                </button>
+              </div>
+              <div className="space-y-4 text-sm leading-relaxed">
+                {aboutBody}
+              </div>
             </div>
           )}
           <Link
@@ -475,37 +500,65 @@ export default function HomePage() {
 
       </div>
 
-      {/* Instructions Dropdown - Desktop */}
+      {/* Instructions Full-Page Overlay - Desktop */}
       {showInstructions && (
         <motion.div
-          initial={{ opacity: 0, y: -10, scale: 0.95 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: -10, scale: 0.95 }}
-          className={`hidden sm:block fixed top-16 left-4 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm z-30 ${
-            darkMode 
-              ? 'bg-gray-900/95 border-gray-600 text-white' 
-              : 'bg-white/95 border-gray-300 text-gray-900'
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className={`hidden sm:block fixed inset-0 bg-black z-50 overflow-y-auto ${
+            darkMode ? 'text-gray-100' : 'text-gray-900'
           }`}
         >
-          <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
-          {instructionsBody}
+          <div className="mx-auto max-w-3xl px-4 py-16">
+            <div className="flex justify-between items-center mb-6">
+              <h1 className="text-3xl font-semibold">Instructions</h1>
+              <button
+                onClick={() => setShowInstructions(false)}
+                className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
+                  darkMode 
+                    ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                    : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                }`}
+              >
+                ✕ Close
+              </button>
+            </div>
+            <div className="space-y-4 text-sm leading-relaxed">
+              {instructionsBody}
+            </div>
+          </div>
         </motion.div>
       )}
 
-      {/* About Dropdown - Desktop */}
+      {/* About Full-Page Overlay - Desktop */}
       {showAbout && (
         <motion.div
-          initial={{ opacity: 0, y: -10, scale: 0.95 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: -10, scale: 0.95 }}
-          className={`hidden sm:block fixed top-16 left-4 w-[min(90vw,22rem)] sm:w-[32rem] max-h-[80vh] overflow-y-auto p-3 sm:p-4 rounded-lg border shadow-xl backdrop-blur-sm z-30 ${
-            darkMode 
-              ? 'bg-gray-900/95 border-gray-600 text-white' 
-              : 'bg-white/95 border-gray-300 text-gray-900'
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className={`hidden sm:block fixed inset-0 bg-black z-50 overflow-y-auto ${
+            darkMode ? 'text-gray-100' : 'text-gray-900'
           }`}
         >
-          <h3 className="font-semibold mb-3 text-sm">About SpiñO</h3>
-          {aboutBody}
+          <div className="mx-auto max-w-3xl px-4 py-16">
+            <div className="flex justify-between items-center mb-6">
+              <h1 className="text-3xl font-semibold">About SpiñO</h1>
+              <button
+                onClick={() => setShowAbout(false)}
+                className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
+                  darkMode 
+                    ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
+                    : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
+                }`}
+              >
+                ✕ Close
+              </button>
+            </div>
+            <div className="space-y-4 text-sm leading-relaxed">
+              {aboutBody}
+            </div>
+          </div>
         </motion.div>
       )}
 
