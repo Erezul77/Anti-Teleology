@@ -192,7 +192,7 @@ export default function HomePage() {
       <section>
         <h3 className="font-semibold mb-1 text-xs uppercase tracking-wide">Story-traps vs. real freedom</h3>
         <p className="text-xs">
-          We humans love to tell ourselves teleological stories, like:
+          We humans love to tell ourselves purpose stories, like:
         </p>
         <ul className="list-disc list-inside space-y-1 text-xs ml-2">
           <li>"This breakup happened so I'll finally grow up."</li>
@@ -237,7 +237,7 @@ export default function HomePage() {
             <li>offer one small, realistic step so you can act from clarity, not from destiny</li>
           </ul>
           <p className="text-xs">
-            When you want to go deeper, you can open the "SpiñO Analysis / Teleology Check" panel to see which story-patterns were detected and how the event looks in causal language.
+            When you want to go deeper, you can open the "SpiñO Analysis / Purpose Story Check" panel to see which story-patterns were detected and how the event looks in causal language.
           </p>
           <p className="text-xs">
             You don't have to choose a mode for this. Just start typing and SpiñO does the rest.
@@ -267,7 +267,7 @@ export default function HomePage() {
             <li>6️⃣ help you choose one small action – or a conscious decision not to act yet</li>
           </ul>
           <p className="text-xs">
-            In storm mode the Teleology Check panel is hidden on purpose. Here the point is not analysis, but turning a sharp emotional hit from pure passivity into a bit more understanding and one concrete move.
+            In storm mode the Purpose Story Check panel is hidden on purpose. Here the point is not analysis, but turning a sharp emotional hit from pure passivity into a bit more understanding and one concrete move.
           </p>
         </div>
       </section>
@@ -323,12 +323,12 @@ export default function HomePage() {
   return (
     <div className={`h-screen flex flex-col overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-black text-white' : 'bg-white text-black'}`}>
       {/* Mobile Header & Controls */}
-      <div className="sm:hidden px-4 pt-6 space-y-4">
+      <div className="sm:hidden px-4 pt-4 pb-2 space-y-3">
         <div className="text-center space-y-1">
           <motion.h1 
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
-            className={`text-2xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'}`}
+            className={`text-2xl sm:text-3xl font-bold bg-gradient-to-r from-blue-400 via-purple-500 to-pink-500 bg-clip-text text-transparent ${darkMode ? 'drop-shadow-lg' : 'drop-shadow-md'}`}
           >
             SpiñO - The Guide to Freedom
           </motion.h1>
@@ -336,7 +336,7 @@ export default function HomePage() {
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
-            className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}
+            className={`text-sm sm:text-base font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}
           >
             From story-traps to real freedom
           </motion.p>
@@ -344,7 +344,7 @@ export default function HomePage() {
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2 }}
-            className={`text-xs italic ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+            className={`text-xs sm:text-sm italic ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
           >
             "Free your mind and the rest will follow..."
           </motion.p>
@@ -352,7 +352,7 @@ export default function HomePage() {
         <div className="space-y-3">
           <button
             onClick={() => setShowInstructions(!showInstructions)}
-            className={`w-full px-3 py-2 rounded-lg border text-xs font-medium transition-all duration-200 ${
+            className={`w-full px-4 py-3 rounded-lg border text-sm font-medium transition-all duration-200 ${
               darkMode 
                 ? 'bg-gray-800 border-gray-600 text-white' 
                 : 'bg-white border-gray-300 text-gray-900'
@@ -384,7 +384,7 @@ export default function HomePage() {
           )}
           <button
             onClick={() => setShowAbout(!showAbout)}
-            className={`w-full px-3 py-2 rounded-lg border text-xs font-medium transition-all duration-200 ${
+            className={`w-full px-4 py-3 rounded-lg border text-sm font-medium transition-all duration-200 ${
               darkMode 
                 ? 'bg-gray-800 border-gray-600 text-white' 
                 : 'bg-white border-gray-300 text-gray-900'
@@ -416,7 +416,7 @@ export default function HomePage() {
           )}
           <Link
             href="/privacy"
-            className={`w-full px-3 py-2 rounded-lg border text-xs font-medium transition-all duration-200 text-center ${
+            className={`w-full px-4 py-3 rounded-lg border text-sm font-medium transition-all duration-200 text-center ${
               darkMode 
                 ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700' 
                 : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
@@ -428,7 +428,7 @@ export default function HomePage() {
             <select 
               value={language} 
               onChange={(e) => setLanguage(e.target.value)}
-              className={`flex-1 min-w-[140px] px-3 py-2 rounded-lg border text-xs font-medium shadow ${
+              className={`flex-1 min-w-[140px] px-4 py-3 rounded-lg border text-sm font-medium shadow ${
                 darkMode 
                   ? 'bg-gray-800 border-gray-600 text-white' 
                   : 'bg-white border-gray-300 text-gray-900'
@@ -448,13 +448,13 @@ export default function HomePage() {
             </select>
             <button
               onClick={toggleDarkMode}
-              className={`px-3 py-2 rounded-lg border shadow transition ${
+              className={`px-4 py-3 rounded-lg border shadow transition ${
                 darkMode 
                   ? 'bg-gray-800 border-gray-600 text-white' 
                   : 'bg-white border-gray-300 text-gray-900'
               }`}
             >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
           </div>
         </div>
@@ -597,14 +597,14 @@ export default function HomePage() {
 
 
       {/* Mobile-responsive Therapy Chat Interface - Clean Version */}
-      <div className="flex-1 flex flex-col lg:flex-row pt-4 sm:pt-10 lg:pt-6 overflow-hidden min-h-0">
-        {/* Main Chat Area */}
-        <div className="flex-1 flex flex-col min-h-0 lg:pt-0 px-2 sm:px-6 pb-6 overflow-hidden">
+      <div className="flex-1 flex flex-col md:flex-row pt-4 sm:pt-10 md:pt-6 overflow-hidden min-h-0">
+        {/* Main Chat Area - Mobile-first, takes priority */}
+        <div className="flex-1 flex flex-col min-h-0 md:w-2/3 w-full md:pt-0 px-3 sm:px-4 md:px-6 pb-4 sm:pb-6 overflow-hidden">
           <UnifiedChatBox messages={messages} setMessages={setMessages} darkMode={darkMode} language={language} sessionMode={sessionMode} />
         </div>
 
         {/* Sidebar - Hidden on mobile, shown on desktop */}
-        <div className={`hidden lg:block w-80 p-4 space-y-4 flex-shrink-0 overflow-y-auto min-h-0 ${
+        <div className={`hidden md:block md:w-1/3 w-full p-4 space-y-4 flex-shrink-0 overflow-y-auto min-h-0 ${
           darkMode 
             ? 'bg-white/5 border-l border-white/10' 
             : 'bg-black/5 border-l border-black/10'

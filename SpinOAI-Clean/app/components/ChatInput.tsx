@@ -59,7 +59,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
   return (
     <div className={containerClasses}>
-      <div className="mx-auto flex max-w-3xl flex-col gap-2 px-3 py-2">
+      <div className="mx-auto flex max-w-3xl flex-col gap-2 px-3 sm:px-4 py-3 sm:py-4">
         {/* Mode toggle row */}
         <div className="flex items-center justify-between gap-2 text-xs sm:text-sm">
           <div className="flex flex-wrap items-center gap-2">
@@ -88,7 +88,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
           <div className="flex-1">
             <textarea
               className={[
-                "w-full resize-none rounded-2xl border px-3 py-2 text-sm shadow-sm outline-none focus:ring-0",
+                "w-full resize-none rounded-2xl border px-4 py-3 sm:px-3 sm:py-2 text-sm sm:text-base shadow-sm outline-none focus:ring-0",
                 darkMode
                   ? "border-gray-700 bg-gray-800 text-gray-100 placeholder-gray-500 focus:border-gray-500"
                   : "border-neutral-200 bg-white text-gray-900 placeholder-gray-400 focus:border-neutral-400"
@@ -110,7 +110,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
             onClick={handleSend}
             disabled={disabled || !value.trim()}
             className={[
-              "mb-[2px] inline-flex items-center justify-center rounded-full px-4 py-2 text-sm font-medium",
+              "mb-[2px] inline-flex items-center justify-center rounded-full px-4 sm:px-4 py-3 sm:py-2 h-10 sm:h-auto text-sm sm:text-base font-medium",
               disabled || !value.trim()
                 ? darkMode
                   ? "cursor-not-allowed bg-gray-700 text-gray-500"

@@ -30,9 +30,9 @@ export default function TeleologyPanel({ teleology, darkMode = true, isEmotional
         <div className={`font-semibold mb-1 ${
           darkMode ? 'text-neutral-200' : 'text-neutral-800'
         }`}>
-          Teleology check
+          SpiñO Analysis – Purpose Story Check
         </div>
-        <div>No teleological pattern detected in the last message.</div>
+        <div>No purpose story pattern detected in the last message.</div>
       </div>
     );
   }
@@ -46,7 +46,10 @@ export default function TeleologyPanel({ teleology, darkMode = true, isEmotional
       <div className={`font-semibold ${
         darkMode ? 'text-neutral-50' : 'text-neutral-900'
       }`}>
-        Teleology check
+        SpiñO Analysis – Purpose Story Check
+      </div>
+      <div className={`text-xs ${darkMode ? 'text-neutral-400' : 'text-neutral-600'} mb-2`}>
+        Teleology here means a hidden purpose story – a way of telling yourself that this happened "for a reason" to you, instead of just seeing the causes.
       </div>
 
       <div className={`flex items-center justify-between text-xs ${

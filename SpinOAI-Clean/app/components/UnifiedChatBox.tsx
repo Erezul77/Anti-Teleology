@@ -281,8 +281,8 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
 
   return (
     <div className={`flex flex-col h-full ${darkMode ? 'text-white' : 'text-black'}`}>
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6">
+      {/* Messages Area - Mobile-first with better spacing */}
+      <div className="flex-1 overflow-y-auto px-3 py-3 sm:px-6 sm:py-6 space-y-3 sm:space-y-4 md:space-y-6">
         <AnimatePresence>
           {messages.map((message, index) => (
             <motion.div
@@ -292,7 +292,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
               exit={{ opacity: 0, y: -20 }}
               className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              <div className={`max-w-full sm:max-w-3xl rounded-2xl p-3 sm:p-4 ${
+              <div className={`max-w-full sm:max-w-3xl rounded-2xl px-4 py-3 sm:px-4 sm:py-4 ${
                 message.role === 'user' 
                   ? darkMode 
                     ? 'bg-blue-600 text-white' 
@@ -314,10 +314,10 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                     </div>
                   )}
                   <div className="flex-1">
-                    <div className="text-xs sm:text-sm font-medium mb-1" style={{fontFamily: 'Arial Unicode MS, Arial, sans-serif'}}>
+                    <div className="text-sm sm:text-base font-medium mb-2" style={{fontFamily: 'Arial Unicode MS, Arial, sans-serif'}}>
                       {message.role === 'user' ? 'You' : 'SpiñO'}
                     </div>
-                    <div className="text-sm sm:text-base leading-relaxed whitespace-pre-wrap">
+                    <div className="text-[15px] sm:text-base leading-relaxed sm:leading-loose whitespace-pre-wrap">
                       {message.content}
                     </div>
                     
@@ -339,7 +339,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
                           }`}
                         >
                           {expandedAnalysisMessages.has(index) ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>Spino Analysis – Teleology & Causality</span>
+                          <span>SpiñO Analysis – Purpose Story & Causality</span>
                         </button>
                         
                         {expandedAnalysisMessages.has(index) && (
@@ -363,7 +363,7 @@ export function UnifiedChatBox({ messages, setMessages, darkMode, language: exte
             animate={{ opacity: 1 }}
             className="flex justify-start"
           >
-              <div className={`max-w-full sm:max-w-3xl rounded-2xl p-3 sm:p-4 ${
+              <div className={`max-w-full sm:max-w-3xl rounded-2xl px-4 py-3 sm:px-4 sm:py-4 ${
               darkMode ? 'bg-gray-800 text-white' : 'bg-gray-100 text-black'
             }`}>
               <div className="flex items-center space-x-3">
